@@ -93,6 +93,32 @@ fun defaultDshApiForProvider(kind: ProviderKind): String = when (kind) {
     else -> "anthropic-messages"
 }
 
+/**
+ * Best-effort protocol choice for a user-entered custom gateway URL.
+ * The picker remains editable because a URL alone cannot prove a gateway's wire format.
+ */
+fun inferredDshApiForUrl(baseUrl: String): String {
+    val normalized = baseUrl.trim().trimEnd('/').lowercase(Locale.ROOT)
+    return when {
+        normalized.endsWith("/responses") -> "openai-responses"
+        "/anthropic" in normalized || "api.anthropic.com" in normalized -> "anthropic-messages"
+        normalized.endsWith("/v1") -> "openai-completions"
+        else -> "anthropic-messages"
+    }
+}
+
+/** Resolves the protocol DeepSeek Harness will actually use for this saved profile. */
+fun providerProtocolForAgent(profile: ProviderProfile, agent: AgentKind): ProviderProtocol {
+    if (agent != AgentKind.DEEPSEEK_HARNESS || profile.kind !in DSH_PROTOCOL_PROVIDERS) {
+        return profile.kind.protocol
+    }
+    return when (profile.dshApi) {
+        "openai-completions" -> ProviderProtocol.OPENAI_CHAT
+        "openai-responses" -> ProviderProtocol.OPENAI_RESPONSES
+        else -> ProviderProtocol.ANTHROPIC_GATEWAY
+    }
+}
+
 /** Provider choices shown for the selected coding agent. */
 fun providersForAgent(agent: AgentKind): List<ProviderKind> = when (agent) {
     AgentKind.DEEPSEEK_HARNESS -> ProviderKind.entries.filter { it in DEEPSEEK_HARNESS_PROVIDERS }

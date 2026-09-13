@@ -4,6 +4,9 @@ import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.DEEPSEEK_HARNESS_PROVIDERS
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
+import com.jarves.mh.model.ProviderProtocol
+import com.jarves.mh.model.inferredDshApiForUrl
+import com.jarves.mh.model.providerProtocolForAgent
 import com.jarves.mh.model.providersForAgent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -207,6 +210,25 @@ class DshRouteMapperTest {
 }
 
 class AgentProviderPresetTest {
+    @Test
+    fun customGatewayUrlSuggestsProtocolWithoutRemovingManualChoice() {
+        assertEquals("openai-completions", inferredDshApiForUrl("https://api.example.com/v1/"))
+        assertEquals("anthropic-messages", inferredDshApiForUrl("https://api.example.com/anthropic"))
+        assertEquals("openai-responses", inferredDshApiForUrl("https://api.example.com/v1/responses"))
+    }
+
+    @Test
+    fun deepSeekHarnessValidationUsesSelectedCustomProtocol() {
+        val profile = ProviderProfile(
+            ProviderKind.CUSTOM,
+            baseUrl = "https://api.example.com/v1",
+            model = "model",
+            dshApi = "openai-completions",
+        )
+        assertEquals(ProviderProtocol.OPENAI_CHAT, providerProtocolForAgent(profile, AgentKind.DEEPSEEK_HARNESS))
+        assertEquals(ProviderProtocol.ANTHROPIC_GATEWAY, providerProtocolForAgent(profile, AgentKind.CLAUDE_CODE))
+    }
+
     @Test
     fun openCodeZenPresetIsLocked() {
         val zen = ProviderKind.OPENCODE_ZEN

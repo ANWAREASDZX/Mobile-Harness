@@ -80,7 +80,10 @@ class ProviderApiClient {
         }
         val endpoint = messagesEndpoint(baseUrl, protocol)
         val body = validationBody(model, protocol)
-        val response = request(endpoint, "POST", apiKey, body, protocol, connectTimeoutMs = 8_000, readTimeoutMs = 10_000)
+        // Gateways may need to cold-start a model before returning the first token.
+        // A ten-second validation timeout produced false "network" failures even
+        // though discovery and the endpoint itself were healthy.
+        val response = request(endpoint, "POST", apiKey, body, protocol, connectTimeoutMs = 12_000, readTimeoutMs = 45_000)
         when {
             response.code in 200..299 -> ConnectionValidation.Success(
                 if (protocol == ProviderProtocol.ANTHROPIC || protocol == ProviderProtocol.ANTHROPIC_GATEWAY || protocol == ProviderProtocol.OPENROUTER) {
@@ -120,7 +123,8 @@ class ProviderApiClient {
                 providerErrorMessage(response.body),
                 "Request failed",
             )
-            response.error?.contains("timed out", ignoreCase = true) == true ->
+            response.error?.contains("timeout", ignoreCase = true) == true ||
+                response.error?.contains("timed out", ignoreCase = true) == true ->
                 ConnectionValidation.Failure("Check your connection and try again.", response.error, "Timed out")
             else -> ConnectionValidation.Failure(
                 "Check your internet connection and provider settings.",
@@ -186,7 +190,7 @@ class ProviderApiClient {
             ProviderProtocol.OPENROUTER -> "$base/v1/messages"
             ProviderProtocol.OPENAI_CHAT -> "$base/chat/completions"
             ProviderProtocol.OPENAI_RESPONSES -> "$base/responses"
-            else -> "$base/v1/messages"
+            else -> if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
         }
     }
 

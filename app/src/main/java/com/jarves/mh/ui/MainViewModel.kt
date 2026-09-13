@@ -31,6 +31,7 @@ import com.jarves.mh.model.ToolRequest
 import com.jarves.mh.model.WorkspaceEntry
 import com.jarves.mh.model.projectSlug
 import com.jarves.mh.model.generateQuickChatIdentity
+import com.jarves.mh.model.providerProtocolForAgent
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.network.ProviderApiClient
@@ -142,6 +143,7 @@ data class AppUiState(
     val startupIndeterminate: Boolean = false,
     val startupError: String? = null,
     val startupErrorIsOffline: Boolean = false,
+    val showDetailedSetupProgress: Boolean = false,
     val onboardingComplete: Boolean = false,
     val backgroundSetupComplete: Boolean = false,
     val provider: ProviderProfile = ProviderProfile(ProviderKind.ANTHROPIC),
@@ -1019,6 +1021,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 startupIndeterminate = false,
                 startupError = null,
                 startupErrorIsOffline = false,
+                showDetailedSetupProgress = true,
             )
         }
         resumeRuntimeSetupService()
@@ -1647,7 +1650,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun discoverModels(profile: ProviderProfile, secret: String): ModelDiscoveryResult {
         val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
-        return providerApi.discoverModels(profile.baseUrl, key, profile.kind.protocol)
+        return providerApi.discoverModels(profile.baseUrl, key, providerProtocolForAgent(profile, _state.value.agentKind))
     }
 
     suspend fun validateProvider(
@@ -1656,7 +1659,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         models: List<com.jarves.mh.network.DiscoveredModel>,
     ): ConnectionValidation {
         val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
-        return providerApi.validate(profile.baseUrl, profile.model, key, profile.kind.protocol, models)
+        return providerApi.validate(
+            profile.baseUrl,
+            profile.model,
+            key,
+            providerProtocolForAgent(profile, _state.value.agentKind),
+            models,
+        )
     }
 
     fun pingApi() {
@@ -1670,7 +1679,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(apiPingStatus = ApiPingStatus.PINGING, apiPingMessage = "Sending a minimal test request…") }
         viewModelScope.launch {
             val key = vault.get(profile.kind.name).orEmpty()
-            val result = providerApi.validate(profile.baseUrl, profile.model, key, profile.kind.protocol, emptyList())
+            val result = providerApi.validate(
+                profile.baseUrl,
+                profile.model,
+                key,
+                providerProtocolForAgent(profile, _state.value.agentKind),
+                emptyList(),
+            )
             when (result) {
                 is ConnectionValidation.Success -> _state.update {
                     it.copy(apiPingStatus = ApiPingStatus.OK, apiPingMessage = "API responded successfully")

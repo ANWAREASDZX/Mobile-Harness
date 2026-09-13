@@ -96,6 +96,7 @@ import com.jarves.mh.model.DSH_PROTOCOL_PROVIDERS
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.model.defaultDshApiForProvider
+import com.jarves.mh.model.inferredDshApiForUrl
 import com.jarves.mh.model.providersForAgent
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.DiscoveredModel
@@ -984,7 +985,16 @@ fun AgentScreen(
                             status = null
                             statusProviderMessage = null
                         },
-                        onBaseUrl = { baseUrl = it; models = emptyList(); status = null; statusProviderMessage = null; keyConnectionStatuses = emptyMap() },
+                        onBaseUrl = {
+                            baseUrl = it
+                            if (state.agentKind == AgentKind.DEEPSEEK_HARNESS && selectedKind == ProviderKind.CUSTOM) {
+                                dshApi = inferredDshApiForUrl(it)
+                            }
+                            models = emptyList()
+                            status = null
+                            statusProviderMessage = null
+                            keyConnectionStatuses = emptyMap()
+                        },
                         onModel = { model = it; status = null; statusProviderMessage = null; keyConnectionStatuses = emptyMap() },
                         onDshApi = { dshApi = it; status = null; statusProviderMessage = null; keyConnectionStatuses = emptyMap() },
                         onNewKeyName = { newKeyName = it },

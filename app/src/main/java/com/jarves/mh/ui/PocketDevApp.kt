@@ -189,6 +189,7 @@ import com.jarves.mh.model.ProjectKind
 import com.jarves.mh.model.ProjectChat
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
+import com.jarves.mh.model.inferredDshApiForUrl
 import com.jarves.mh.model.providersForAgent
 import com.jarves.mh.model.ToolRequest
 import com.jarves.mh.model.WorkspaceEntry
@@ -266,12 +267,18 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onSelectAgent = viewModel::selectAgent,
             onDownload = viewModel::startRuntimeSetup,
         )
-        state.startupStage == StartupStage.INSTALLING ||
-            state.startupStage == StartupStage.INITIALIZING -> StartupLoadingScreen(
-            state = state,
-            themeMode = state.themeMode,
-            onToggleTheme = viewModel::toggleTheme,
-        )
+        state.startupStage == StartupStage.INSTALLING && state.showDetailedSetupProgress ->
+            RuntimeInstallationScreen(
+                state = state,
+                themeMode = state.themeMode,
+                onToggleTheme = viewModel::toggleTheme,
+            )
+        state.startupStage == StartupStage.INSTALLING || state.startupStage == StartupStage.INITIALIZING ->
+            StartupLoadingScreen(
+                state = state,
+                themeMode = state.themeMode,
+                onToggleTheme = viewModel::toggleTheme,
+            )
         state.startupStage == StartupStage.ERROR -> StartupErrorScreen(
             message = state.startupError,
             isOffline = state.startupErrorIsOffline,
@@ -1438,6 +1445,143 @@ private fun SpecRow(
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
+private fun RuntimeInstallationScreen(
+    state: AppUiState,
+    themeMode: AppThemeMode = AppThemeMode.DARK,
+    onToggleTheme: () -> Unit = {},
+) {
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
+    }
+
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        BrandMark(compact = true)
+                        Spacer(Modifier.width(9.dp))
+                        Text("Set up Mobile Harness", fontWeight = FontWeight.Bold)
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onToggleTheme) {
+                        Icon(
+                            if (themeMode == AppThemeMode.DARK) Icons.Default.LightMode else Icons.Default.DarkMode,
+                            contentDescription = "Toggle theme",
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+            )
+        },
+    ) { padding ->
+        Column(
+            Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.Top,
+        ) {
+            StepDots(0)
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "STEP 1 OF 3",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = PocketOrange,
+                    letterSpacing = 1.1.sp,
+                )
+                Spacer(Modifier.weight(1f))
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(50),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Default.Shield, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(12.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Local setup", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Build your workspace",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Box(Modifier.fillMaxWidth().height(42.dp), contentAlignment = Alignment.CenterStart) {
+                Text(
+                    state.startupMessage,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 15.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Installation progress", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
+                        Text("${(state.startupProgress * 100).toInt()}%", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    LinearProgressIndicator(
+                        progress = { state.startupProgress.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Row(Modifier.fillMaxWidth().height(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Estimated ${setupTimeEstimate(state.selectedDevStacks)}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.5.sp,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        state.startupBytes?.let { (downloaded, total) ->
+                            Text(
+                                "${formatMegabytes(downloaded)} / ${formatMegabytes(total)}",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.5.sp,
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            SetupLogPanel(
+                logs = state.startupLogs.ifEmpty { listOf("$ ${state.startupMessage}") },
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "You can leave Mobile Harness in the background and follow setup from the notification.",
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
 private fun StartupLoadingScreen(
     state: AppUiState,
     themeMode: AppThemeMode = AppThemeMode.DARK,
@@ -2190,7 +2334,12 @@ private fun ProviderSetupScreen(
                     model = model,
                     dshApi = dshApi,
                     apiKey = apiKey,
-                    onBaseUrl = { baseUrl = it },
+                    onBaseUrl = {
+                        baseUrl = it
+                        if (agentKind == AgentKind.DEEPSEEK_HARNESS && selected == ProviderKind.CUSTOM) {
+                            dshApi = inferredDshApiForUrl(it)
+                        }
+                    },
                     onModel = { model = it },
                     onDshApi = { dshApi = it },
                     onApiKey = { apiKey = it },
@@ -2523,6 +2672,7 @@ private fun ProviderCredentialsStep(
     var isDiscovering by remember { mutableStateOf(false) }
     var isValidating by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
+    var statusDetails by remember { mutableStateOf<String?>(null) }
     var statusOk by remember { mutableStateOf(false) }
     var showModels by rememberSaveable { mutableStateOf(false) }
     var modelSearch by rememberSaveable { mutableStateOf("") }
@@ -2539,6 +2689,7 @@ private fun ProviderCredentialsStep(
         scope.launch {
             isDiscovering = true
             status = null
+            statusDetails = null
             when (val result = onDiscover()) {
                 is ModelDiscoveryResult.Success -> {
                     models = result.models
@@ -2550,6 +2701,7 @@ private fun ProviderCredentialsStep(
                 is ModelDiscoveryResult.Failure -> {
                     statusOk = false
                     status = result.message
+                    statusDetails = result.providerMessage
                 }
             }
             isDiscovering = false
@@ -2680,7 +2832,7 @@ private fun ProviderCredentialsStep(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     OutlinedTextField(
                         baseUrl,
-                        { onBaseUrl(it); status = null; models = emptyList() },
+                        { onBaseUrl(it); status = null; statusDetails = null; models = emptyList() },
                         label = { Text("Base URL") },
                         supportingText = {
                             if (provider.fixedBaseUrl) Text("Fixed by ${provider.title}")
@@ -2695,7 +2847,7 @@ private fun ProviderCredentialsStep(
                     }
                     OutlinedTextField(
                         apiKey,
-                        { onApiKey(it); status = null },
+                        { onApiKey(it); status = null; statusDetails = null },
                         label = { Text("API key") },
                         placeholder = { Text(if (hasStoredSecret) "Saved securely — leave blank to keep it" else "Enter your API key") },
                         supportingText = {
@@ -2708,7 +2860,7 @@ private fun ProviderCredentialsStep(
                     )
                     OutlinedTextField(
                         model,
-                        { onModel(it); status = null },
+                        { onModel(it); status = null; statusDetails = null },
                         label = { Text("Model name") },
                         supportingText = { Text("Select an available model or enter an exact model ID.") },
                         singleLine = true,
@@ -2741,6 +2893,15 @@ private fun ProviderCredentialsStep(
                     color = if (statusOk) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
                     fontSize = 13.sp,
                 )
+                statusDetails?.takeIf(String::isNotBlank)?.let { details ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        details,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                    )
+                }
             }
         }
         item {
@@ -2749,6 +2910,7 @@ private fun ProviderCredentialsStep(
                         scope.launch {
                             isValidating = true
                             status = "Checking API key, model, and Claude Code settings…"
+                            statusDetails = null
                             statusOk = true
                             when (val result = onValidate(models)) {
                                 is ConnectionValidation.Success -> {
@@ -2758,6 +2920,7 @@ private fun ProviderCredentialsStep(
                                 }
                                 is ConnectionValidation.Failure -> {
                                     status = result.message
+                                    statusDetails = result.providerMessage
                                     statusOk = false
                                 }
                             }
