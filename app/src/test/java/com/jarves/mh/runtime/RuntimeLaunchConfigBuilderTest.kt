@@ -4,6 +4,7 @@ import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class RuntimeLaunchConfigBuilderTest {
@@ -54,5 +55,36 @@ class RuntimeLaunchConfigBuilderTest {
         assertEquals("temporary-openrouter-secret", config.environment["ANTHROPIC_AUTH_TOKEN"])
         assertEquals("temporary-openrouter-secret", config.environment["OPENROUTER_API_KEY"])
         assertEquals("", config.environment["ANTHROPIC_API_KEY"])
+    }
+
+    @Test
+    fun claudeSubscriptionUsesOAuthTokenWithoutApiKeyFallback() {
+        val config = RuntimeLaunchConfigBuilder.build(
+            ProviderProfile(ProviderKind.CLAUDE),
+            authToken = "subscription-token",
+        )
+
+        assertEquals("subscription-token", config.environment["CLAUDE_CODE_OAUTH_TOKEN"])
+        assertEquals("", config.environment["ANTHROPIC_API_KEY"])
+        assertEquals("", config.environment["ANTHROPIC_AUTH_TOKEN"])
+        assertNull(config.environment["ANTHROPIC_BASE_URL"])
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun claudeSubscriptionRequiresToken() {
+        RuntimeLaunchConfigBuilder.build(ProviderProfile(ProviderKind.CLAUDE))
+    }
+
+    @Test
+    fun nvidiaNimUsesOpenAiCompatibilityGateway() {
+        val profile = ProviderProfile(ProviderKind.NVIDIA_NIM)
+        val config = RuntimeLaunchConfigBuilder.build(
+            profile,
+            authToken = "nvapi-secret",
+            localGatewayUrl = "http://127.0.0.1:12345",
+        )
+
+        assertEquals("http://127.0.0.1:12345", config.environment["ANTHROPIC_BASE_URL"])
+        assertEquals("claude-sonnet-4-6", config.environment["ANTHROPIC_MODEL"])
     }
 }

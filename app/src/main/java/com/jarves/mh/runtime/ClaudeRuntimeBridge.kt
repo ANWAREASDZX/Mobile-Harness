@@ -108,8 +108,13 @@ class ClaudeRuntimeBridge(
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
         pushForegroundProgress("Starting Claude Code…")
         val secret = secretFor(provider).orEmpty()
-        if (provider.kind != ProviderKind.CLAUDE && secret.isBlank()) {
-            eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "No API key is saved for ${provider.kind.title}."))
+        if (secret.isBlank()) {
+            val message = if (provider.kind == ProviderKind.CLAUDE) {
+                "No Claude subscription token is saved. Add one from Agent → AI provider."
+            } else {
+                "No API key is saved for ${provider.kind.title}."
+            }
+            eventBus.emit(RuntimeEvent.SessionFailed(sessionId, message))
             return@withContext sessionId
         }
 

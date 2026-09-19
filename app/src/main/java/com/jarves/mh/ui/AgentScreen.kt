@@ -1040,7 +1040,15 @@ fun AgentScreen(
                                 val kind = selectedKind
                                 val url = if (kind.fixedBaseUrl) kind.defaultBaseUrl else baseUrl.trim()
                                 val profile = ProviderProfile(kind, url, model.trim(), dshApi = dshApi)
-                                when (val result = onValidateProvider(profile, apiKey.trim(), models)) {
+                                if (kind == ProviderKind.CLAUDE) {
+                                    onSaveProvider(profile, apiKey.trim())
+                                    status = "Claude subscription token saved securely. Send a message to verify your subscription."
+                                    statusOk = true
+                                    activeKeyId?.let {
+                                        keyConnectionStatuses = keyConnectionStatuses +
+                                            (it to KeyConnectionStatus("Subscription token saved", true, label = "Saved"))
+                                    }
+                                } else when (val result = onValidateProvider(profile, apiKey.trim(), models)) {
                                     is ConnectionValidation.Success -> {
                                         onSaveProvider(profile, apiKey.trim())
                                         if (activeKeyId != null) {
@@ -1528,58 +1536,60 @@ private fun AgentProviderCard(
                 }
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+            if (selectedKind != ProviderKind.CLAUDE) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
-            PremiumSummaryRow(
-                icon = Icons.Default.Info,
-                title = if (selectedKind == ProviderKind.CUSTOM) "Custom API settings" else "Endpoint & protocol",
-                subtitle = buildString {
-                    append(baseUrl.ifBlank { "Base URL required" })
-                    if (state.agentKind == AgentKind.DEEPSEEK_HARNESS && selectedKind in DSH_PROTOCOL_PROVIDERS) {
-                        append(" · ")
-                        append(dshApi)
-                    }
-                },
-                expanded = endpointExpanded,
-                onClick = { endpointExpanded = !endpointExpanded },
-            )
+                PremiumSummaryRow(
+                    icon = Icons.Default.Info,
+                    title = if (selectedKind == ProviderKind.CUSTOM) "Custom API settings" else "Endpoint & protocol",
+                    subtitle = buildString {
+                        append(baseUrl.ifBlank { "Base URL required" })
+                        if (state.agentKind == AgentKind.DEEPSEEK_HARNESS && selectedKind in DSH_PROTOCOL_PROVIDERS) {
+                            append(" · ")
+                            append(if (selectedKind.fixedProtocol) defaultDshApiForProvider(selectedKind) else dshApi)
+                        }
+                    },
+                    expanded = endpointExpanded,
+                    onClick = { endpointExpanded = !endpointExpanded },
+                )
 
-            AnimatedVisibility(endpointExpanded) {
-                Column(
-                    modifier = Modifier.padding(top = 8.dp, bottom = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    if (selectedKind == ProviderKind.CUSTOM) {
-                        Text(
-                            "Enter the provider endpoint, then add its API key under Credentials.",
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                AnimatedVisibility(endpointExpanded) {
+                    Column(
+                        modifier = Modifier.padding(top = 8.dp, bottom = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        if (selectedKind == ProviderKind.CUSTOM) {
+                            Text(
+                                "Enter the provider endpoint, then add its API key under Credentials.",
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        OutlinedTextField(
+                            value = baseUrl,
+                            onValueChange = { if (!selectedKind.fixedBaseUrl) onBaseUrl(it) },
+                            label = { Text("Base URL") },
+                            supportingText = if (selectedKind.fixedBaseUrl) ({ Text("Fixed by ${selectedKind.title}") }) else null,
+                            readOnly = selectedKind.fixedBaseUrl,
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
                         )
-                    }
-                    OutlinedTextField(
-                        value = baseUrl,
-                        onValueChange = { if (!selectedKind.fixedBaseUrl) onBaseUrl(it) },
-                        label = { Text("Base URL") },
-                        supportingText = if (selectedKind.fixedBaseUrl) ({ Text("Fixed by ${selectedKind.title}") }) else null,
-                        readOnly = selectedKind.fixedBaseUrl,
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                    )
-                    if (state.agentKind == AgentKind.DEEPSEEK_HARNESS && selectedKind in DSH_PROTOCOL_PROVIDERS) {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            Text("Gateway protocol", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.height(5.dp))
-                            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f)) {
-                                Column {
-                                    listOf("anthropic-messages", "openai-completions", "openai-responses").forEach { option ->
-                                        Row(
-                                            Modifier.fillMaxWidth().clickable { onDshApi(option) }.padding(horizontal = 12.dp, vertical = 9.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Text(option, Modifier.weight(1f), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                                            AgentSelectionDot(dshApi == option)
+                        if (state.agentKind == AgentKind.DEEPSEEK_HARNESS && selectedKind in DSH_PROTOCOL_PROVIDERS && !selectedKind.fixedProtocol) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text("Gateway protocol", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(Modifier.height(5.dp))
+                                Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f)) {
+                                    Column {
+                                        listOf("anthropic-messages", "openai-completions", "openai-responses").forEach { option ->
+                                            Row(
+                                                Modifier.fillMaxWidth().clickable { onDshApi(option) }.padding(horizontal = 12.dp, vertical = 9.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                Text(option, Modifier.weight(1f), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                                                AgentSelectionDot(dshApi == option)
+                                            }
                                         }
                                     }
                                 }
@@ -1587,30 +1597,38 @@ private fun AgentProviderCard(
                         }
                     }
                 }
-            }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Model & access", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Model & access", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Text(
+                        if (isDiscovering) "Discovering…" else if (models.isEmpty()) "Discover models" else "${models.size} models",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = PocketOrange,
+                        modifier = Modifier.clickable(enabled = !isDiscovering, onClick = onDiscover).padding(6.dp),
+                    )
+                }
+
+                PremiumSummaryRow(
+                    icon = Icons.Default.AutoAwesome,
+                    title = "AI model",
+                    subtitle = model.ifBlank { "Select or type a model ID" },
+                    expanded = false,
+                    onClick = onOpenModelSheet,
+                )
+            } else {
                 Text(
-                    if (isDiscovering) "Discovering…" else if (models.isEmpty()) "Discover models" else "${models.size} models",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = PocketOrange,
-                    modifier = Modifier.clickable(enabled = !isDiscovering, onClick = onDiscover).padding(6.dp),
+                    "Run `claude setup-token` on a computer signed in to your Claude subscription, then save the generated token below.",
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 12.dp),
                 )
             }
-
-            PremiumSummaryRow(
-                icon = Icons.Default.AutoAwesome,
-                title = "AI model",
-                subtitle = model.ifBlank { "Select or type a model ID" },
-                expanded = false,
-                onClick = onOpenModelSheet,
-            )
 
             if (status != null) {
                 Column(modifier = Modifier.padding(start = 48.dp, end = 8.dp, bottom = 8.dp)) {
@@ -1629,9 +1647,9 @@ private fun AgentProviderCard(
 
             PremiumSummaryRow(
                 icon = Icons.Default.Key,
-                title = "Credentials",
+                title = if (selectedKind == ProviderKind.CLAUDE) "Subscription token" else "Credentials",
                 subtitle = buildString {
-                    append(activeKey?.name ?: "No API key saved")
+                    append(activeKey?.name ?: if (selectedKind == ProviderKind.CLAUDE) "No subscription token saved" else "No API key saved")
                     if (activeKey != null) append(" · Active")
                     activeKeyStatus?.let {
                         append(" · ")
@@ -1675,7 +1693,7 @@ private fun AgentProviderCard(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Saved keys (${savedKeys.size})", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                        Text(if (selectedKind == ProviderKind.CLAUDE) "Saved tokens (${savedKeys.size})" else "Saved keys (${savedKeys.size})", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
                         Text(
                             if (addKeyExpanded) "Cancel" else "+ Add key",
                             fontSize = 11.sp,
@@ -1728,7 +1746,7 @@ private fun AgentProviderCard(
                                         onNewKeyName("${selectedKind.title} Key")
                                     } else onNewKeyName(input)
                                 },
-                                label = { Text("Key name") },
+                                label = { Text(if (selectedKind == ProviderKind.CLAUDE) "Token name" else "Key name") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(12.dp),
@@ -1736,7 +1754,7 @@ private fun AgentProviderCard(
                             OutlinedTextField(
                                 value = newApiKey,
                                 onValueChange = onNewApiKey,
-                                label = { Text("API key") },
+                                label = { Text(if (selectedKind == ProviderKind.CLAUDE) "Claude setup token" else "API key") },
                                 singleLine = true,
                                 visualTransformation = if (newKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -1749,7 +1767,7 @@ private fun AgentProviderCard(
                                 enabled = newKeyName.isNotBlank() && newApiKey.isNotBlank(),
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(12.dp),
-                            ) { Text("Save API key") }
+                            ) { Text(if (selectedKind == ProviderKind.CLAUDE) "Save token" else "Save API key") }
                         }
                     }
                 }
@@ -1758,7 +1776,8 @@ private fun AgentProviderCard(
             Spacer(Modifier.height(12.dp))
             OutlinedButton(
                 onClick = onValidate,
-                enabled = baseUrl.isNotBlank() && model.isNotBlank() && apiKey.isNotBlank() && !isDiscovering && !isValidating,
+                enabled = apiKey.isNotBlank() && !isDiscovering && !isValidating &&
+                    (selectedKind == ProviderKind.CLAUDE || (baseUrl.isNotBlank() && model.isNotBlank())),
                 modifier = Modifier.fillMaxWidth().height(46.dp),
                 shape = RoundedCornerShape(13.dp),
                 border = BorderStroke(1.dp, PocketOrange.copy(alpha = 0.7f)),
@@ -1767,10 +1786,19 @@ private fun AgentProviderCard(
                     CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.8.dp, color = PocketOrange)
                     Spacer(Modifier.width(8.dp))
                 } else {
-                    Icon(Icons.Default.Refresh, null, Modifier.size(16.dp), tint = PocketOrange)
+                    Icon(if (selectedKind == ProviderKind.CLAUDE) Icons.Default.Check else Icons.Default.Refresh, null, Modifier.size(16.dp), tint = PocketOrange)
                     Spacer(Modifier.width(8.dp))
                 }
-                Text(if (isValidating) "Testing connection…" else "Test connection", color = PocketOrange, fontWeight = FontWeight.SemiBold)
+                Text(
+                    when {
+                        isValidating && selectedKind == ProviderKind.CLAUDE -> "Saving token…"
+                        isValidating -> "Testing connection…"
+                        selectedKind == ProviderKind.CLAUDE -> "Save subscription token"
+                        else -> "Test connection"
+                    },
+                    color = PocketOrange,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
         }
     }
@@ -1951,6 +1979,9 @@ private fun defaultModelsForProvider(kind: ProviderKind): List<DiscoveredModel> 
     )
     ProviderKind.OPENCODE_ZEN -> listOf(
         DiscoveredModel(ProviderKind.OPENCODE_ZEN.defaultModel, "OpenCode Zen default"),
+    )
+    ProviderKind.NVIDIA_NIM -> listOf(
+        DiscoveredModel(ProviderKind.NVIDIA_NIM.defaultModel, "Qwen 2.5 Coder 32B"),
     )
     ProviderKind.ANTHROPIC -> listOf(
         DiscoveredModel("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet (Hybrid)"),

@@ -113,6 +113,8 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -167,6 +169,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -196,6 +199,7 @@ import com.jarves.mh.model.WorkspaceEntry
 import com.jarves.mh.model.projectSlug
 import com.jarves.mh.runtime.RuntimeExecutionService
 import com.jarves.mh.runtime.RuntimeSetupService
+import com.jarves.mh.runtime.supportsArm64Runtime
 import com.jarves.mh.runtime.AntigravityAuthStatus
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -789,7 +793,7 @@ private fun RuntimeSetupPromptScreen(
     val memoryInfo = remember { ActivityManager.MemoryInfo().also(activityManager::getMemoryInfo) }
     val totalRamGb = memoryInfo.totalMem.toDouble() / 1_073_741_824.0
     val totalRamLabel = String.format(java.util.Locale.US, "%.1f", totalRamGb)
-    val arm64 = Build.SUPPORTED_64_BIT_ABIS.any { it == "arm64-v8a" }
+    val arm64 = supportsArm64Runtime(Build.SUPPORTED_ABIS, System.getProperty("os.arch"))
     // Android reports usable physical memory after hardware/GPU reservations.
     // RAM is therefore informational; it must not reject nominal 4 GB phones.
     val compatible = arm64
@@ -2119,6 +2123,7 @@ private fun RootScreenHost(
                     onActivateApiKey = viewModel::activateApiKey,
                     onRemoveApiKey = viewModel::removeApiKey,
                     onInstallDevStack = viewModel::installDevStack,
+                    onRemoveDevStack = viewModel::removeDevStack,
                     onInstallAgent = viewModel::installAgent,
                     onCheckAgentUpdates = viewModel::checkAgentUpdates,
                     onUpdateAgent = viewModel::updateAgent,
@@ -2320,11 +2325,7 @@ private fun ProviderSetupScreen(
                             apiKey = ""
                         }
                     },
-                    onContinue = {
-                        if (selected == ProviderKind.CLAUDE) {
-                            onSave(ProviderProfile(selected), "")
-                        } else step = 2
-                    },
+                    onContinue = { step = 2 },
                     onChangeAgent = { showAgentPicker = true },
                 )
                 else -> ProviderCredentialsStep(
@@ -2419,7 +2420,7 @@ private fun DeviceCheckStep(context: Context, onContinue: () -> Unit) {
     val memoryInfo = remember { ActivityManager.MemoryInfo().also(activityManager::getMemoryInfo) }
     val totalRamGb = memoryInfo.totalMem.toDouble() / 1_073_741_824.0
     val totalRamLabel = String.format(java.util.Locale.US, "%.1f", totalRamGb)
-    val arm64 = Build.SUPPORTED_64_BIT_ABIS.any { it == "arm64-v8a" }
+    val arm64 = supportsArm64Runtime(Build.SUPPORTED_ABIS, System.getProperty("os.arch"))
     val compatible = arm64
     Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
         BrandMark()
@@ -2569,6 +2570,7 @@ private fun ProviderChoiceRow(
         ProviderKind.DEEPSEEK -> Color(0xFF4D6BFE)
         ProviderKind.KIMI -> Color(0xFF8B7CF6)
         ProviderKind.OPENCODE_ZEN -> Color(0xFF22C55E)
+        ProviderKind.NVIDIA_NIM -> Color(0xFF76B900)
         ProviderKind.CUSTOM -> PocketOrange
     }
     val mark = when (provider) {
@@ -2578,6 +2580,7 @@ private fun ProviderChoiceRow(
         ProviderKind.DEEPSEEK -> "DS"
         ProviderKind.KIMI -> "K"
         ProviderKind.OPENCODE_ZEN -> "Z"
+        ProviderKind.NVIDIA_NIM -> "NV"
         ProviderKind.CUSTOM -> "<>"
     }
 
@@ -2683,6 +2686,17 @@ private fun ProviderCredentialsStep(
         if (query.isEmpty()) models else models.filter {
             it.id.contains(query, ignoreCase = true) || it.displayName.contains(query, ignoreCase = true)
         }
+    }
+
+    if (provider == ProviderKind.CLAUDE) {
+        ClaudeSubscriptionCredentialsStep(
+            token = apiKey,
+            hasStoredToken = hasStoredSecret,
+            onToken = onApiKey,
+            onSave = onSave,
+            onChangeAgent = onChangeAgent,
+        )
+        return
     }
 
     fun discoverModels(openWhenReady: Boolean = true) {
@@ -2842,7 +2856,7 @@ private fun ProviderCredentialsStep(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    if (agentKind == AgentKind.DEEPSEEK_HARNESS && provider in DSH_PROTOCOL_PROVIDERS) {
+                    if (agentKind == AgentKind.DEEPSEEK_HARNESS && provider in DSH_PROTOCOL_PROVIDERS && !provider.fixedProtocol) {
                         DshApiProtocolPicker(selected = dshApi, onSelected = { onDshApi(it); status = null })
                     }
                     OutlinedTextField(
@@ -2942,6 +2956,95 @@ private fun ProviderCredentialsStep(
                 onClick = onChangeAgent,
                 modifier = Modifier.fillMaxWidth(),
             ) {
+                Text("Use another coding agent", fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClaudeSubscriptionCredentialsStep(
+    token: String,
+    hasStoredToken: Boolean,
+    onToken: (String) -> Unit,
+    onSave: () -> Unit,
+    onChangeAgent: () -> Unit,
+) {
+    var tokenVisible by rememberSaveable { mutableStateOf(false) }
+    val hasToken = token.isNotBlank() || hasStoredToken
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().imePadding(),
+        contentPadding = PaddingValues(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("STEP 3 OF 3", color = PocketOrange, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                Spacer(Modifier.weight(1f))
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = CircleShape) {
+                    Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Key, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Encrypted locally", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Text("Claude subscription", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Connect a Claude Pro, Max, Team, or Enterprise subscription to Claude Code.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        item {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(20.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("1. On a computer where Claude Code is installed, run:", fontSize = 13.sp)
+                    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(10.dp)) {
+                        Text(
+                            "claude setup-token",
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            fontFamily = FontFamily.Monospace,
+                            color = PocketOrange,
+                        )
+                    }
+                    Text("2. Sign in to Claude and paste the generated token here.", fontSize = 13.sp)
+                    OutlinedTextField(
+                        value = token,
+                        onValueChange = onToken,
+                        label = { Text("Claude setup token") },
+                        placeholder = { Text(if (hasStoredToken) "Saved securely — leave blank to keep it" else "Paste token") },
+                        supportingText = if (hasStoredToken && token.isBlank()) ({ Text("A saved subscription token is ready to use") }) else null,
+                        singleLine = true,
+                        visualTransformation = if (tokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        trailingIcon = {
+                            IconButton(onClick = { tokenVisible = !tokenVisible }) {
+                                Icon(if (tokenVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility, "Toggle token visibility")
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+        item {
+            Button(
+                onClick = onSave,
+                enabled = hasToken,
+                modifier = Modifier.fillMaxWidth().height(54.dp),
+            ) {
+                Text("Save and continue")
+            }
+        }
+        item {
+            TextButton(onClick = onChangeAgent, modifier = Modifier.fillMaxWidth()) {
                 Text("Use another coding agent", fontSize = 12.sp)
             }
         }

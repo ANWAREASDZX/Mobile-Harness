@@ -141,7 +141,12 @@ class RuntimeInstaller(private val context: Context) {
         agent: com.jarves.mh.model.AgentKind = com.jarves.mh.model.AgentKind.CLAUDE_CODE,
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ): InstalledRuntime {
-        require(android.os.Build.SUPPORTED_ABIS.contains("arm64-v8a")) { "Pocket runtime requires an ARM64 device" }
+        require(
+            supportsArm64Runtime(
+                android.os.Build.SUPPORTED_ABIS,
+                System.getProperty("os.arch"),
+            ),
+        ) { "Unsupported architecture: Mobile Harness requires an ARM64 device or ARM64 emulator" }
         val proot = File(context.applicationInfo.nativeLibraryDir, "libproot.so")
         require(proot.canExecute()) { "The embedded PRoot launcher is unavailable" }
 
@@ -631,6 +636,108 @@ class RuntimeInstaller(private val context: Context) {
         if (isStackInstalled(stack)) return
         applyStack(runtime.proot, stack, 0.05f, 0.95f, onProgress)
         onProgress(RuntimeInstallProgress("${stack.label} tools are ready", 1f))
+    }
+
+    /**
+     * Removes an optional development stack without touching projects or the core
+     * Node.js/Git runtime. Package-backed stacks are purged through dpkg; bundled
+     * stacks remove only their dedicated SDK/language directories.
+     */
+    suspend fun removeStack(
+        stack: DevStack,
+        onProgress: suspend (RuntimeInstallProgress) -> Unit,
+    ) {
+        require(stack != DevStack.WEB) { "Web tools are part of the core runtime and cannot be removed" }
+        val runtime = installedRuntime()
+        if (!isStackInstalled(stack)) return
+
+        onProgress(RuntimeInstallProgress("Removing ${stack.label} tools", 0.1f, indeterminate = true))
+        when (stack) {
+            DevStack.WEB -> Unit
+            DevStack.PYTHON -> removePythonStack()
+            DevStack.ANDROID -> removeAndroidStack()
+            DevStack.CPP -> aptRemove(
+                runtime.proot,
+                listOf("build-essential", "gcc", "g++", "make", "cmake", "gdb"),
+                0.45f,
+                onProgress,
+            )
+            DevStack.PHP -> {
+                aptRemove(
+                    runtime.proot,
+                    listOf("php-cli", "php-mbstring", "php-xml", "php-curl", "php-zip"),
+                    0.45f,
+                    onProgress,
+                )
+                removePath(File(rootfs, "usr/local/bin/composer"))
+                removePath(File(rootfs, "root/.cache/composer"))
+                removePath(File(rootfs, "root/.composer"))
+            }
+        }
+
+        writeDevStackState(readDevStackState().apply { put(stack.name, false) })
+        onProgress(RuntimeInstallProgress("${stack.label} removed", 1f))
+    }
+
+    private fun removePythonStack() {
+        listOf(
+            ".pocket-python-tools-version",
+            "usr/bin/python3",
+            "usr/bin/python3.8",
+            "usr/bin/pip",
+            "usr/bin/pip3",
+            "usr/lib/aarch64-linux-gnu/libpython3.8.so.1",
+            "usr/lib/aarch64-linux-gnu/libpython3.8.so.1.0",
+            "usr/lib/python3",
+            "usr/lib/python3.8",
+            "usr/local/lib/python3.8",
+            "usr/share/python3",
+            "usr/share/python-wheels",
+            "root/.cache/pip",
+        ).forEach { removePath(File(rootfs, it)) }
+    }
+
+    private fun removeAndroidStack() {
+        listOf(
+            "root/android-sdk",
+            "root/maven",
+            "root/.pocket-android-tools-version",
+            "root/.gradle/caches",
+            "root/.gradle/daemon",
+            "root/.gradle/native",
+            "root/.gradle/notifications",
+            "root/.gradle/wrapper/dists",
+            "root/.gradle/init.d/pocketdev-android.gradle",
+            "opt/gradle",
+            "opt/jdk-17.0.20.1+1",
+            "usr/local/bin/jar",
+            "usr/local/bin/jarsigner",
+            "usr/local/bin/java",
+            "usr/local/bin/javac",
+            "usr/local/bin/javadoc",
+            "usr/local/bin/keytool",
+        ).forEach { removePath(File(rootfs, it)) }
+        removeAndroidGradleProperty()
+    }
+
+    private fun removeAndroidGradleProperty() {
+        val properties = File(rootfs, "root/.gradle/gradle.properties")
+        if (!properties.isFile) return
+        val propertyPattern = Regex("^\\s*${Regex.escape(ANDROID_AAPT2_PROPERTY)}\\s*[:=].*$")
+        val remaining = properties.readLines().filterNot { propertyPattern.matches(it) }
+        if (remaining.isEmpty()) {
+            properties.delete()
+        } else {
+            properties.writeText(remaining.joinToString("\n").trimEnd() + "\n")
+        }
+    }
+
+    private fun removePath(file: File) {
+        if (file.isDirectory && !java.nio.file.Files.isSymbolicLink(file.toPath())) {
+            check(file.deleteRecursively()) { "Could not remove ${file.name}" }
+        } else if (file.exists() || java.nio.file.Files.isSymbolicLink(file.toPath())) {
+            check(file.delete()) { "Could not remove ${file.name}" }
+        }
     }
 
     private suspend fun applyStack(
@@ -1124,6 +1231,28 @@ class RuntimeInstaller(private val context: Context) {
             timeoutMs = 30 * 60 * 1_000L,
             onProgress = onProgress,
             failureMessage = "Could not install: $packageNames",
+        )
+    }
+
+    private suspend fun aptRemove(
+        proot: File,
+        packages: List<String>,
+        fraction: Float,
+        onProgress: suspend (RuntimeInstallProgress) -> Unit,
+    ) {
+        require(packages.isNotEmpty()) { "No packages selected" }
+        val packageNames = packages.joinToString(" ")
+        val command = "export DEBIAN_FRONTEND=noninteractive; " +
+            "apt-get -o DPkg::Lock::Timeout=120 purge -y $packageNames && " +
+            "apt-get clean && rm -rf /var/lib/apt/lists/*"
+        runGuestCommand(
+            proot = proot,
+            command = command,
+            displayCommand = "apt-get purge -y $packageNames",
+            fraction = fraction,
+            timeoutMs = 20 * 60 * 1_000L,
+            onProgress = onProgress,
+            failureMessage = "Could not remove: $packageNames",
         )
     }
 

@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -62,6 +63,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -122,6 +124,7 @@ fun SettingsScreen(
     onActivateApiKey: (ProviderKind, String) -> List<ApiKeyInfo>,
     onRemoveApiKey: (ProviderKind, String) -> List<ApiKeyInfo>,
     onInstallDevStack: (DevStack) -> Unit = {},
+    onRemoveDevStack: (DevStack) -> Unit = {},
     onInstallAgent: (AgentKind) -> Unit = {},
     onCheckAgentUpdates: () -> Unit = {},
     onUpdateAgent: (AgentKind) -> Unit = {},
@@ -139,6 +142,26 @@ fun SettingsScreen(
     var expanded by rememberSaveable { mutableStateOf<SettingsSection?>(null) }
     var terminalCleared by remember { mutableStateOf(false) }
     var showReliabilityHelp by rememberSaveable { mutableStateOf(false) }
+    var stackPendingRemoval by remember { mutableStateOf<DevStack?>(null) }
+
+    stackPendingRemoval?.let { stack ->
+        AlertDialog(
+            onDismissRequest = { stackPendingRemoval = null },
+            title = { Text("Remove ${stack.label}?") },
+            text = {
+                Text("This removes the toolchain and its runtime caches to free storage. Your projects and source files will not be deleted.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        stackPendingRemoval = null
+                        onRemoveDevStack(stack)
+                    },
+                ) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { stackPendingRemoval = null }) { Text("Cancel") } },
+        )
+    }
 
     fun toggle(section: SettingsSection) {
         expanded = if (expanded == section) null else section
@@ -218,14 +241,20 @@ fun SettingsScreen(
                     DevStack.entries.forEachIndexed { index, stack ->
                         val installed = stack in state.installedDevStacks
                         val installing = state.devStackInstalling == stack
+                        val removing = installing && state.devStackRemoving
                         Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(stack.label, fontWeight = FontWeight.SemiBold)
                                 Text(stack.installsSummary, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             when {
+                                removing -> Text("Removing…", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                 installing -> Text("${(state.devStackProgress * 100).toInt()}%", color = PocketOrange, fontWeight = FontWeight.Bold)
-                                installed -> Text("Installed", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                installed && stack == DevStack.WEB -> Text("Included", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                installed -> TextButton(
+                                    onClick = { stackPendingRemoval = stack },
+                                    enabled = state.devStackInstalling == null,
+                                ) { Text("Remove", color = MaterialTheme.colorScheme.error) }
                                 else -> OutlinedButton(onClick = { onInstallDevStack(stack) }, enabled = state.devStackInstalling == null) { Text("Add") }
                             }
                         }

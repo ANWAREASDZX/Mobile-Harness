@@ -32,6 +32,15 @@ enum class ProviderKind(
         fixedBaseUrl = true,
         fixedProtocol = true,
     ),
+    NVIDIA_NIM(
+        "NVIDIA NIM",
+        "OpenAI-compatible models hosted by NVIDIA",
+        ProviderProtocol.OPENAI_CHAT,
+        "https://integrate.api.nvidia.com/v1",
+        "qwen/qwen2.5-coder-32b-instruct",
+        fixedBaseUrl = true,
+        fixedProtocol = true,
+    ),
     CUSTOM("Custom API", "Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "", "", true),
 }
 
@@ -79,17 +88,20 @@ val DEEPSEEK_HARNESS_PROVIDERS: Set<ProviderKind> = setOf(
     ProviderKind.LLM_ROUTER,
     ProviderKind.KIMI,
     ProviderKind.OPENCODE_ZEN,
+    ProviderKind.NVIDIA_NIM,
     ProviderKind.CUSTOM,
 )
 
 val DSH_PROTOCOL_PROVIDERS: Set<ProviderKind> = setOf(
     ProviderKind.KIMI,
     ProviderKind.OPENCODE_ZEN,
+    ProviderKind.NVIDIA_NIM,
     ProviderKind.CUSTOM,
 )
 
 fun defaultDshApiForProvider(kind: ProviderKind): String = when (kind) {
     ProviderKind.OPENCODE_ZEN -> "openai-responses"
+    ProviderKind.NVIDIA_NIM -> "openai-completions"
     else -> "anthropic-messages"
 }
 
@@ -112,7 +124,8 @@ fun providerProtocolForAgent(profile: ProviderProfile, agent: AgentKind): Provid
     if (agent != AgentKind.DEEPSEEK_HARNESS || profile.kind !in DSH_PROTOCOL_PROVIDERS) {
         return profile.kind.protocol
     }
-    return when (profile.dshApi) {
+    val api = if (profile.kind.fixedProtocol) defaultDshApiForProvider(profile.kind) else profile.dshApi
+    return when (api) {
         "openai-completions" -> ProviderProtocol.OPENAI_CHAT
         "openai-responses" -> ProviderProtocol.OPENAI_RESPONSES
         else -> ProviderProtocol.ANTHROPIC_GATEWAY

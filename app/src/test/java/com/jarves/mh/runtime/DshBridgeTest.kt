@@ -203,6 +203,14 @@ class DshRouteMapperTest {
         assertEquals("https://gw.example/v1", route.custom?.baseUrl)
     }
 
+    @Test
+    fun nvidiaNimUsesFixedOpenAiCompletionsRoute() {
+        val route = DshRouteMapper.forProfile(ProviderProfile(ProviderKind.NVIDIA_NIM))
+        assertEquals("nvidia-nim", route.name)
+        assertEquals("openai-completions", route.custom?.api)
+        assertEquals("https://integrate.api.nvidia.com/v1", route.custom?.baseUrl)
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun claudeSubscriptionIsRejected() {
         DshRouteMapper.forProfile(ProviderProfile(ProviderKind.CLAUDE))
@@ -245,11 +253,19 @@ class AgentProviderPresetTest {
     }
 
     @Test
+    fun storedDriftCannotOverrideFixedProtocol() {
+        val profile = ProviderProfile(ProviderKind.NVIDIA_NIM, dshApi = "anthropic-messages")
+        assertEquals(ProviderProtocol.OPENAI_CHAT, providerProtocolForAgent(profile, AgentKind.DEEPSEEK_HARNESS))
+        assertEquals("openai-completions", DshRouteMapper.forProfile(profile).custom?.api)
+    }
+
+    @Test
     fun dshHarnessExcludesClaudeSubscription() {
         assertFalse(ProviderKind.CLAUDE in DEEPSEEK_HARNESS_PROVIDERS)
         assertTrue(ProviderKind.OPENCODE_ZEN in DEEPSEEK_HARNESS_PROVIDERS)
         assertTrue(ProviderKind.DEEPSEEK in DEEPSEEK_HARNESS_PROVIDERS)
-        assertEquals(6, DEEPSEEK_HARNESS_PROVIDERS.size)
+        assertTrue(ProviderKind.NVIDIA_NIM in DEEPSEEK_HARNESS_PROVIDERS)
+        assertEquals(7, DEEPSEEK_HARNESS_PROVIDERS.size)
     }
 
     @Test

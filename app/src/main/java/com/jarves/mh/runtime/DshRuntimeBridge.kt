@@ -698,7 +698,13 @@ internal object DshRouteMapper {
                 name = "opencode-zen",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
                 defaultModel = model,
-                custom = DshCustomRoute(profile.dshApi.ifBlank { "openai-responses" }, profile.resolvedBaseUrl),
+                custom = DshCustomRoute("openai-responses", profile.resolvedBaseUrl),
+            )
+            ProviderKind.NVIDIA_NIM -> DshRoute(
+                name = "nvidia-nim",
+                keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
+                defaultModel = model,
+                custom = DshCustomRoute("openai-completions", profile.resolvedBaseUrl),
             )
             ProviderKind.CUSTOM -> DshRoute(
                 name = "mh-custom",

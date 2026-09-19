@@ -51,6 +51,7 @@ import com.jarves.mh.runtime.RuntimeSetupController
 import com.jarves.mh.runtime.RuntimeSetupService
 import com.jarves.mh.runtime.RuntimeSetupSnapshot
 import com.jarves.mh.runtime.RuntimeSetupStatus
+import com.jarves.mh.runtime.supportsArm64Runtime
 import com.jarves.mh.runtime.AndroidAppInstaller
 import com.jarves.mh.update.AppUpdateInfo
 import com.jarves.mh.update.AppUpdater
@@ -202,6 +203,7 @@ data class AppUiState(
     val selectedDevStacks: Set<DevStack> = emptySet(),
     val installedDevStacks: Set<DevStack> = emptySet(),
     val devStackInstalling: DevStack? = null,
+    val devStackRemoving: Boolean = false,
     val devStackMessage: String? = null,
     val devStackProgress: Float = 0f,
     val devStackBytes: Pair<Long, Long>? = null,
@@ -978,6 +980,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun bootstrap() {
+        if (!supportsArm64Runtime(android.os.Build.SUPPORTED_ABIS, System.getProperty("os.arch"))) {
+            _state.update {
+                it.copy(
+                    startupStage = StartupStage.SETUP_REQUIRED,
+                    startupMessage = "ARM64 device required",
+                    startupError = null,
+                    startupErrorIsOffline = false,
+                )
+            }
+            return
+        }
         val setupSnapshot = RuntimeSetupController.snapshot.value
         if (setupSnapshot.status == RuntimeSetupStatus.RUNNING) {
             onSetupSnapshot(setupSnapshot)
@@ -1251,7 +1264,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun finishOnboarding(profile: ProviderProfile, secret: String) {
         vault.put(profile.kind.name, secret)
         val saved = profile.copy(
-            hasSecret = secret.isNotBlank() || vault.contains(profile.kind.name) || profile.kind == ProviderKind.CLAUDE,
+            hasSecret = secret.isNotBlank() || vault.contains(profile.kind.name),
         )
         preferences.saveProvider(saved, _state.value.agentKind)
         preferences.onboardingComplete = true
@@ -1587,6 +1600,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update {
             it.copy(
                 devStackInstalling = stack,
+                devStackRemoving = false,
                 devStackMessage = "Preparing ${stack.label}…",
                 devStackProgress = 0f,
                 devStackBytes = null,
@@ -1635,6 +1649,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { current ->
                 current.copy(
                     devStackInstalling = null,
+                    devStackRemoving = false,
                     installedDevStacks = if (result.isSuccess) current.installedDevStacks + stack else current.installedDevStacks,
                     devStackProgress = 0f,
                     devStackBytes = null,
@@ -1642,6 +1657,60 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     devStackMessage = result.fold(
                         onSuccess = { "${stack.label} tools are ready" },
                         onFailure = { _ -> result.exceptionOrNull()?.message?.take(200) ?: "Could not install ${stack.label}" },
+                    ),
+                )
+            }
+        }
+    }
+
+    /** Removes an optional toolchain after the Settings confirmation dialog. */
+    fun removeDevStack(stack: DevStack) {
+        if (_state.value.devStackInstalling != null || stack == DevStack.WEB) return
+        if (_state.value.isRunning || _state.value.projectTerminalRunning) {
+            _state.update { it.copy(toastMessage = "Stop running tasks and terminal commands before removing tools") }
+            return
+        }
+        _state.update {
+            it.copy(
+                devStackInstalling = stack,
+                devStackRemoving = true,
+                devStackMessage = "Removing ${stack.label}…",
+                devStackProgress = 0.1f,
+                devStackBytes = null,
+                devStackBytesPerSecond = null,
+            )
+        }
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    installer.removeStack(stack) { progress ->
+                        _state.update { current ->
+                            current.copy(
+                                devStackMessage = progress.message,
+                                devStackProgress = progress.fraction.coerceIn(0f, 1f),
+                            )
+                        }
+                    }
+                }
+            }
+            if (result.isSuccess) {
+                val selected = _state.value.selectedDevStacks - stack
+                preferences.selectedDevStacks = selected.map { it.name }.toSet()
+            }
+            _state.update { current ->
+                current.copy(
+                    selectedDevStacks = if (result.isSuccess) current.selectedDevStacks - stack else current.selectedDevStacks,
+                    installedDevStacks = if (result.isSuccess) current.installedDevStacks - stack else current.installedDevStacks,
+                    devStackInstalling = null,
+                    devStackRemoving = false,
+                    devStackProgress = 0f,
+                    devStackMessage = result.fold(
+                        onSuccess = { "${stack.label} removed" },
+                        onFailure = { result.exceptionOrNull()?.message?.take(200) ?: "Could not remove ${stack.label}" },
+                    ),
+                    toastMessage = result.fold(
+                        onSuccess = { "${stack.label} removed" },
+                        onFailure = { "Could not remove ${stack.label}" },
                     ),
                 )
             }
