@@ -165,6 +165,11 @@ data class AppUiState(
     val githubRepositories: List<GitHubRepository> = emptyList(),
     val githubRepositoriesLoading: Boolean = false,
     val activeProject: Project? = null,
+    val workspaceVisible: Boolean = false,
+    val readOnlyProject: Project? = null,
+    val readOnlyProjectChats: List<ProjectChat> = emptyList(),
+    val readOnlyChatId: String? = null,
+    val readOnlyMessages: List<ChatMessage> = emptyList(),
     val projectChats: List<ProjectChat> = emptyList(),
     val activeChatId: String? = null,
     val workspaceFiles: List<WorkspaceEntry> = emptyList(),
@@ -1810,6 +1815,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openProject(project: Project) {
+        val current = _state.value
+        if (current.activeProject?.id == project.id) {
+            _state.update {
+                it.copy(
+                    workspaceVisible = true,
+                    readOnlyProject = null,
+                    readOnlyProjectChats = emptyList(),
+                    readOnlyChatId = null,
+                    readOnlyMessages = emptyList(),
+                )
+            }
+            return
+        }
+        if (current.isRunning || current.projectTerminalRunning) {
+            val chats = preferences.loadProjectChats(project.id).ifEmpty {
+                listOf(ProjectChat(title = "Main chat"))
+            }
+            val chat = chats.first()
+            _state.update {
+                it.copy(
+                    readOnlyProject = project,
+                    readOnlyProjectChats = chats,
+                    readOnlyChatId = chat.id,
+                    readOnlyMessages = preferences.loadMessages(project.id, chat.id),
+                )
+            }
+            return
+        }
         configureBridgeRoots(project.id, project.rootPath)
         val terminal = loadProjectTerminal(project)
         val suggestedRoot = if (project.rootPath.isBlank()) detectNestedProjectRoot(project) else null
@@ -1822,6 +1855,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update {
             it.copy(
                 activeProject = project,
+                workspaceVisible = true,
+                readOnlyProject = null,
+                readOnlyProjectChats = emptyList(),
+                readOnlyChatId = null,
+                readOnlyMessages = emptyList(),
                 projectChats = chats,
                 activeChatId = activeChat.id,
                 messages = msgs,
@@ -1856,10 +1894,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun closeProject() {
         val active = _state.value.activeProject
         persistMessages()
-        if (_state.value.isRunning) {
-            viewModelScope.launch { activeRuntime().stopActiveSession() }
+        if (_state.value.isRunning || _state.value.projectTerminalRunning) {
+            _state.update {
+                it.copy(
+                    workspaceVisible = false,
+                    toastMessage = if (it.isRunning) {
+                        "Task continues in the background"
+                    } else {
+                        "Terminal command continues in the background"
+                    },
+                )
+            }
+            return
         }
-        if (_state.value.projectTerminalRunning) stopProjectTerminalCommand()
 
         if (active != null) {
             val chats = preferences.loadProjectChats(active.id)
@@ -1886,6 +1933,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update {
             it.copy(
                 activeProject = null,
+                workspaceVisible = false,
                 projectChats = emptyList(),
                 activeChatId = null,
                 changes = emptyList(),
@@ -1910,10 +1958,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun closeReadOnlyProject() {
+        _state.update {
+            it.copy(
+                readOnlyProject = null,
+                readOnlyProjectChats = emptyList(),
+                readOnlyChatId = null,
+                readOnlyMessages = emptyList(),
+            )
+        }
+    }
+
+    fun switchReadOnlyChat(chatId: String) {
+        val project = _state.value.readOnlyProject ?: return
+        if (_state.value.readOnlyProjectChats.none { it.id == chatId }) return
+        _state.update {
+            it.copy(
+                readOnlyChatId = chatId,
+                readOnlyMessages = preferences.loadMessages(project.id, chatId),
+            )
+        }
+    }
+
+    fun activateReadOnlyProject() {
+        if (_state.value.isRunning || _state.value.projectTerminalRunning) return
+        val project = _state.value.readOnlyProject ?: return
+        closeReadOnlyProject()
+        openProject(project)
+    }
+
     fun consumeToast() = _state.update { it.copy(toastMessage = null) }
 
     fun createProject(name: String) {
         if (name.isBlank()) return
+        if (_state.value.isRunning || _state.value.projectTerminalRunning) {
+            _state.update { it.copy(toastMessage = "Stop the background task before creating another project") }
+            return
+        }
         val baseSlug = projectSlug(name)
         val usedSlugs = _state.value.projects.mapTo(mutableSetOf()) { it.slug }
         val slug = generateSequence(1) { it + 1 }
@@ -1931,6 +2012,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 projects = listOf(project) + it.projects,
                 activeProject = project,
+                workspaceVisible = true,
                 messages = listOf(ChatMessage(fromUser = false, text = "Hi! Tell me what you want to build or change.")),
                 liveProcess = emptyList(),
                 liveThinking = false,
@@ -1961,6 +2043,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun createQuickProject() {
+        if (_state.value.isRunning || _state.value.projectTerminalRunning) {
+            _state.update { it.copy(toastMessage = "Stop the background task before creating another project") }
+            return
+        }
         val identity = generateQuickChatIdentity(_state.value.projects.mapTo(mutableSetOf()) { it.slug })
         val project = Project(
             name = identity.displayName,
@@ -1978,7 +2064,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importZipProject(uri: Uri) {
-        if (_state.value.projectImporting || _state.value.isRunning) return
+        if (_state.value.projectImporting || _state.value.isRunning || _state.value.projectTerminalRunning) return
         _state.update { it.copy(projectImporting = true, projectImportMessage = "Reading project archive…") }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { extractImportedProject(uri) } }
@@ -2141,7 +2227,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun cloneGitRepository(url: String, repositoryName: String?, branch: String?, useGitHubCli: Boolean) {
-        if (_state.value.gitCloneRunning || _state.value.projectImporting || _state.value.isRunning) return
+        if (_state.value.gitCloneRunning || _state.value.projectImporting || _state.value.isRunning || _state.value.projectTerminalRunning) return
         val normalized = runCatching { validateGitUrl(url) }.getOrElse { error ->
             _state.update { it.copy(toastMessage = error.message ?: "Enter a valid public HTTPS Git URL") }
             return

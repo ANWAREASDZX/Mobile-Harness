@@ -318,7 +318,13 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
                 onToggleTheme = viewModel::toggleTheme,
                 onContinue = viewModel::finishBackgroundSetup,
             )
-        state.activeProject != null -> WorkspaceScreen(
+        state.readOnlyProject != null -> ReadOnlyProjectScreen(
+            state = state,
+            onBack = viewModel::closeReadOnlyProject,
+            onSwitchChat = viewModel::switchReadOnlyChat,
+            onContinueHere = viewModel::activateReadOnlyProject,
+        )
+        state.activeProject != null && state.workspaceVisible -> WorkspaceScreen(
             state = state,
             onBack = viewModel::closeProject,
             onSend = viewModel::sendPrompt,
@@ -3322,6 +3328,8 @@ private fun ProjectsScreen(
                 items(projects, key = { it.id }) { project ->
                     ProjectCard(
                         project = project,
+                        taskRunning = state.isRunning && state.activeProject?.id == project.id,
+                        terminalRunning = state.projectTerminalRunning && state.activeProject?.id == project.id,
                         onOpen = { onOpen(project) },
                         onRename = { onRenameProject(project.id, it) },
                         onDelete = { onDeleteProject(project.id) },
@@ -3628,7 +3636,14 @@ private fun ApiStatusChip(state: AppUiState, onSettings: () -> Unit, onPing: () 
 
 
 @Composable
-private fun ProjectCard(project: Project, onOpen: () -> Unit, onRename: (String) -> Unit, onDelete: () -> Unit) {
+private fun ProjectCard(
+    project: Project,
+    taskRunning: Boolean,
+    terminalRunning: Boolean,
+    onOpen: () -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: () -> Unit,
+) {
     var menuOpen by rememberSaveable(project.id) { mutableStateOf(false) }
     var showRename by rememberSaveable(project.id) { mutableStateOf(false) }
     var showDelete by rememberSaveable(project.id) { mutableStateOf(false) }
@@ -3640,7 +3655,26 @@ private fun ProjectCard(project: Project, onOpen: () -> Unit, onRename: (String)
             }
             Spacer(Modifier.width(13.dp))
             Column(Modifier.weight(1f)) {
-                Text(project.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        project.name,
+                        modifier = Modifier.weight(1f, fill = false),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (taskRunning || terminalRunning) {
+                        Spacer(Modifier.width(8.dp))
+                        CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            if (taskRunning) "Task running" else "Terminal running",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
                 Text(
                     if (project.kind == ProjectKind.QUICK_PROJECT) "Quick project" else project.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -3684,6 +3718,90 @@ private fun ProjectCard(project: Project, onOpen: () -> Unit, onRename: (String)
             confirmButton = { TextButton(onClick = { onDelete(); showDelete = false }) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { showDelete = false }) { Text("Cancel") } },
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReadOnlyProjectScreen(
+    state: AppUiState,
+    onBack: () -> Unit,
+    onSwitchChat: (String) -> Unit,
+    onContinueHere: () -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    val project = state.readOnlyProject ?: return
+    val activeChat = state.readOnlyProjectChats.firstOrNull { it.id == state.readOnlyChatId }
+    val listState = rememberLazyListState()
+    var showChats by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(state.readOnlyChatId) {
+        if (state.readOnlyMessages.isNotEmpty()) listState.scrollToItem(state.readOnlyMessages.lastIndex)
+    }
+
+    if (showChats) {
+        ChatSwitcherDialog(
+            chats = state.readOnlyProjectChats,
+            activeChatId = state.readOnlyChatId,
+            switchingEnabled = true,
+            allowCreate = false,
+            onDismiss = { showChats = false },
+            onCreate = {},
+            onSwitch = { chatId ->
+                onSwitchChat(chatId)
+                showChats = false
+            },
+        )
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(project.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            "${activeChat?.title ?: "Chat"} · History",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Projects") }
+                },
+                actions = {
+                    IconButton(onClick = { showChats = true }) { Icon(Icons.Default.History, "Project chats") }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+            )
+        },
+    ) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding)) {
+            ChatTab(
+                messages = state.readOnlyMessages,
+                approval = null,
+                liveProcess = emptyList(),
+                isRunning = false,
+                onSend = {},
+                onStop = {},
+                onApproval = {},
+                listState = listState,
+                taskStartedAtMillis = null,
+                taskFinishedAtMillis = null,
+                thinkingActive = false,
+                agentKind = state.agentKind,
+                pendingAttachments = emptyList(),
+                onAttach = {},
+                onRemoveAttachment = {},
+                onOpenAttachment = {},
+                onRunInTerminal = {},
+                readOnly = true,
+                readOnlyBlocked = state.isRunning || state.projectTerminalRunning,
+                onContinueHere = onContinueHere,
+            )
+        }
     }
 }
 
@@ -4001,16 +4119,19 @@ private fun ChatSwitcherDialog(
     onDismiss: () -> Unit,
     onCreate: () -> Unit,
     onSwitch: (String) -> Unit,
+    allowCreate: Boolean = true,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Project chats") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = onCreate, enabled = switchingEnabled, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Add, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("New chat")
+                if (allowCreate) {
+                    Button(onClick = onCreate, enabled = switchingEnabled, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Add, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("New chat")
+                    }
                 }
                 if (!switchingEnabled) {
                     Text("Finish the running task before switching chats.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -4316,6 +4437,9 @@ private fun ChatTab(
     onRemoveAttachment: (String) -> Unit,
     onOpenAttachment: (ChatAttachment) -> Unit,
     onRunInTerminal: (String) -> Unit,
+    readOnly: Boolean = false,
+    readOnlyBlocked: Boolean = false,
+    onContinueHere: () -> Unit = {},
 ) {
     val view = LocalView.current
     // Keep the screen on while the selected agent is working in this chat. Released automatically
@@ -4397,7 +4521,35 @@ private fun ChatTab(
                 }
             }
         }
-        Surface(
+        if (readOnly) {
+            Surface(
+                color = MaterialTheme.colorScheme.background,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Icon(Icons.Default.History, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Column(Modifier.weight(1f)) {
+                        Text("Read-only history", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (readOnlyBlocked) {
+                                "Another project has a running task. You can read this chat, but cannot send a message."
+                            } else {
+                                "The other task finished. Open this project to continue chatting."
+                            },
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (!readOnlyBlocked) {
+                        TextButton(onClick = onContinueHere) { Text("Open") }
+                    }
+                }
+            }
+        } else Surface(
             color = MaterialTheme.colorScheme.background,
             modifier = Modifier.fillMaxWidth(),
         ) {
