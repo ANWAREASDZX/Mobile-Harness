@@ -62,6 +62,12 @@ class ClaudeRuntimeBridge(
     private val secretFor: (ProviderProfile) -> String?,
     /** Current autonomy mode; read live so a settings change applies to the next session. */
     private val autonomyProvider: () -> AgentAutonomyMode = { AgentAutonomyMode.APPROVE_RISKY },
+    /**
+     * Reports the Claude Code `session_id` observed in the stream (init/result
+     * events) as (projectId, claudeSessionId). The app persists it per chat so
+     * an interrupted task can be resumed natively with --resume (ISSUE-007).
+     */
+    private val saveConversationId: (String, String) -> Unit = { _, _ -> },
 ) : RuntimeBridge {
     private val installer = RuntimeInstaller(context)
     /** Shared checkpoint store — the bridge's private copy was removed (ISSUE-014/039/040). */
@@ -76,6 +82,14 @@ class ClaudeRuntimeBridge(
     @Volatile private var activeSessionId: String? = null
     @Volatile private var userStopRequested: Boolean = false
     @Volatile private var activeProjectSlug: String? = null
+    /** Project of the running session, so the session_id callback can address the right chat. */
+    @Volatile private var activeProjectId: String? = null
+    /**
+     * One-shot native resume (ISSUE-007): when set before a session starts, the
+     * CLI is launched with `--resume <id>` and continues the agent's own
+     * conversation context instead of rebuilding it from the transcript.
+     */
+    @Volatile private var resumeSessionId: String? = null
     @Volatile private var taskStartedAtElapsedRealtime: Long = 0L
     @Volatile private var lastForegroundProgressAt: Long = 0L
     @Volatile private var foregroundResultPosted: Boolean = false
@@ -85,6 +99,11 @@ class ClaudeRuntimeBridge(
     private var lastReasoningUpdateAt = 0L
     private var lastThinkingUpdateAt = 0L
     private var currentThinkingBlockId = 0L
+
+    /** Arms a native --resume for the next session; consumed exactly once by [startSession]. */
+    fun requestResume(claudeSessionId: String) {
+        if (claudeSessionId.isNotBlank()) resumeSessionId = claudeSessionId
+    }
 
     override suspend fun startSession(projectId: String, projectSlug: String, projectKind: ProjectKind, prompt: String, conversationHistory: List<ChatMessage>, provider: ProviderProfile): String = withContext(Dispatchers.IO + NonCancellable) {
         val sessionId = UUID.randomUUID().toString()
@@ -175,24 +194,27 @@ class ClaudeRuntimeBridge(
             AppLog.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
             AppLog.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
 
-            // Build a context-aware prompt that includes conversation history
+            // Build a context-aware prompt that includes conversation history.
+            // Native resume (ISSUE-007): a one-shot --resume continues the agent's
+            // own conversation context, so the transcript is NOT re-embedded in
+            // the prompt on that path.
+            val claudeResumeId = resumeSessionId
+            resumeSessionId = null
+            activeProjectId = projectId
             val guestWorkspacePath = "/workspace/$projectSlug"
-            val contextPrompt = buildContextPrompt(prompt, conversationHistory, guestWorkspacePath, projectKind)
+            val contextPrompt = buildContextPrompt(
+                prompt,
+                if (claudeResumeId.isNullOrBlank()) conversationHistory else emptyList(),
+                guestWorkspacePath,
+                projectKind,
+            )
 
-            val command = buildList {
-                add(launch.executable)
-                add("--bare")
-                add("-p")
-                add(contextPrompt)
-                add("--output-format")
-                add("stream-json")
-                add("--include-partial-messages")
-                add("--verbose")
-                add("--model")
-                add(launch.environment["ANTHROPIC_MODEL"] ?: provider.model)
-                add("--max-turns")
-                add("25")
-            }
+            val command = claudePrintCommand(
+                executable = launch.executable,
+                model = launch.environment["ANTHROPIC_MODEL"] ?: provider.model,
+                prompt = contextPrompt,
+                resumeSessionId = claudeResumeId,
+            )
             AppLog.d("ClaudeBridge", "Launching command: $command")
             val process = installer.process(
                 installed.proot,
@@ -282,6 +304,7 @@ class ClaudeRuntimeBridge(
         ThermalMonitor.stop()
         activeProcess = null
         activeSessionId = null
+        activeProjectId = null
         RuntimeTaskController.unregister(sessionId)
         sessionId
     }
@@ -491,11 +514,21 @@ class ClaudeRuntimeBridge(
         return true
     }
 
+    /**
+     * Forwards an observed Claude Code `session_id` (init/result events) to the
+     * app so it can be persisted per chat and reused for a native --resume
+     * after a process death (ISSUE-007).
+     */
+    private fun reportConversationId(json: JSONObject) {
+        val id = json.optString("session_id").trim().takeUnless(String::isEmpty) ?: return
+        activeProjectId?.let { projectId -> saveConversationId(projectId, id) }
+    }
+
     private suspend fun consumeClaudeJsonEvent(sessionId: String, json: JSONObject) {
         when (json.optString("type")) {
             "stream_event" -> json.optJSONObject("event")?.let { consumeClaudeJsonEvent(sessionId, it) }
             "system" -> when (json.optString("subtype")) {
-                "init" -> Unit
+                "init" -> reportConversationId(json)
                 "thinking_tokens" -> emitReasoningProgress(sessionId, json.optInt("estimated_tokens"))
                 "permission_denied" -> eventBus.emit(
                     RuntimeEvent.RuntimeLog(
@@ -589,6 +622,7 @@ class ClaudeRuntimeBridge(
                 }
             }
             "result" -> {
+                reportConversationId(json)
                 if (json.optBoolean("is_error")) {
                     val message = json.optString("result").ifBlank { "Claude Code reported an error" }
                     throw IllegalStateException(message)
@@ -863,5 +897,34 @@ class ClaudeRuntimeBridge(
         /** Interactive approvals auto-deny after this long with no user answer (ISSUE-001). */
         private const val APPROVAL_TIMEOUT_MS = 60_000L
         private const val APPROVAL_POLL_MS = 250L
+    }
+}
+
+/**
+ * Headless Claude Code invocation (ISSUE-007): pure command assembly so the
+ * flag set — including the one-shot `--resume <id>` used to continue an
+ * interrupted task natively — stays JVM-testable without spawning a process.
+ */
+internal fun claudePrintCommand(
+    executable: String,
+    model: String,
+    prompt: String,
+    resumeSessionId: String? = null,
+): List<String> = buildList {
+    add(executable)
+    add("--bare")
+    add("-p")
+    add(prompt)
+    add("--output-format")
+    add("stream-json")
+    add("--include-partial-messages")
+    add("--verbose")
+    add("--model")
+    add(model)
+    add("--max-turns")
+    add("25")
+    if (!resumeSessionId.isNullOrBlank()) {
+        add("--resume")
+        add(resumeSessionId)
     }
 }

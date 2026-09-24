@@ -129,6 +129,16 @@ Mobile Harness unites modern **Jetpack Compose UI** with a self-contained **Ubun
       <p>Add Python, Android, C/C++, and PHP tooling only when a project needs it.</p>
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Interrupted-Task Resume</h3>
+      <p>When Android kills the app mid-job, the in-flight task is journaled to disk and the next start offers a one-tap Resume that continues the agent's own conversation (Claude <code>--resume</code>, Antigravity <code>--conversation</code>) or rebuilds it from the saved transcript.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>Bounded Local Storage</h3>
+      <p>Chats live in a size-capped SQLite store with differential saves, and terminal history is scrubbed of credential-shaped values before it touches disk.</p>
+    </td>
+  </tr>
 </table>
 
 <br />

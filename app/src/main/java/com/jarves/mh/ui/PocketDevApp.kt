@@ -187,6 +187,7 @@ import com.jarves.mh.model.DEEPSEEK_HARNESS_PROVIDERS
 import com.jarves.mh.model.DSH_PROTOCOL_PROVIDERS
 import com.jarves.mh.model.DiffLine
 import com.jarves.mh.model.DiffLineType
+import com.jarves.mh.model.InterruptedSession
 import com.jarves.mh.model.Project
 import com.jarves.mh.model.ProjectKind
 import com.jarves.mh.model.ProjectChat
@@ -2068,6 +2069,18 @@ private fun RootScreenHost(
         },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
+            Column(Modifier.fillMaxSize()) {
+                // A journal that survived a process death surfaces as a one-tap
+                // resume banner (ISSUE-007) on every root tab until handled.
+                state.interruptedSession?.let { session ->
+                    InterruptedSessionBanner(
+                        session = session,
+                        repeatedInterruptions = state.repeatedInterruptions,
+                        onResume = viewModel::resumeInterruptedTask,
+                        onDismiss = viewModel::dismissInterruptedTask,
+                        onOpenBatterySettings = viewModel::openBatteryOptimizationSettings,
+                    )
+                }
             when (screen) {
                 RootScreen.PROJECTS -> ProjectsScreen(
                     state = state,
@@ -2145,6 +2158,7 @@ private fun RootScreenHost(
                     onClearDebugUpdateManifestUrl = viewModel::clearDebugUpdateManifestUrl,
                 )
             }
+            }
         }
     }
     if (showQuickTerminal) {
@@ -2166,6 +2180,84 @@ private fun RootScreenHost(
                 showQuickCommands = true,
                 compactHeader = true,
             )
+        }
+    }
+}
+
+/**
+ * "Task interrupted — Resume / Dismiss" banner (ISSUE-007, roadmap 3h). Shown on
+ * the root screen when the session journal proves the OS killed a task mid-flight.
+ * After repeated interruptions it also points at the battery-optimization
+ * exemption list (innovation 3).
+ */
+@Composable
+private fun InterruptedSessionBanner(
+    session: InterruptedSession,
+    repeatedInterruptions: Boolean,
+    onResume: () -> Unit,
+    onDismiss: () -> Unit,
+    onOpenBatterySettings: () -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Warning, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text("Task interrupted", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text(
+                        "${session.agentKind.title} was working in ${session.projectSlug} when the app was stopped by the system.",
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                    )
+                }
+            }
+            if (session.request.isNotBlank()) {
+                Text(
+                    session.request,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(start = 30.dp, top = 4.dp),
+                    color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
+                )
+            }
+            if (repeatedInterruptions) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(start = 30.dp, top = 8.dp),
+                ) {
+                    Icon(
+                        Icons.Default.BatterySaver,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "This keeps happening. Exempt Mobile Harness from battery optimization?",
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onOpenBatterySettings) {
+                        Text("Open settings", fontSize = 12.sp)
+                    }
+                }
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            ) {
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
+                Button(onClick = onResume) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (session.canResumeNatively) "Resume task" else "Restart task")
+                }
+            }
         }
     }
 }

@@ -304,6 +304,23 @@ data class ToolRequest(
     val risk: RiskLevel,
 )
 
+/**
+ * A task that was in flight when the OS killed the app process (ISSUE-007,
+ * roadmap 3h). Detected at startup from the session journal and surfaced as a
+ * "Task interrupted — Resume / Dismiss" banner. `canResumeNatively` is true
+ * when the agent's own conversation id was captured before the kill, letting
+ * the resume continue the exact server-side context (--resume / --conversation)
+ * instead of rebuilding it from the persisted transcript.
+ */
+data class InterruptedSession(
+    val agentKind: AgentKind,
+    val projectId: String,
+    val projectSlug: String,
+    val request: String,
+    val startedAtMillis: Long,
+    val canResumeNatively: Boolean,
+)
+
 sealed interface RuntimeEvent {
     val sessionId: String
 

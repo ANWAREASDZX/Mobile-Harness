@@ -14,7 +14,10 @@ import com.jarves.mh.BuildConfig
 import com.jarves.mh.data.ApiKeyVault
 import com.jarves.mh.data.ApiKeyInfo
 import com.jarves.mh.data.AppPreferences
+import com.jarves.mh.data.JournalEntry
 import com.jarves.mh.data.SecretRedactor
+import com.jarves.mh.data.SessionJournal
+import com.jarves.mh.data.SessionJournalCodec
 import com.jarves.mh.model.ActivityItem
 import com.jarves.mh.model.AgentAutonomyMode
 import com.jarves.mh.model.AgentKind
@@ -31,6 +34,7 @@ import com.jarves.mh.model.RuntimeEvent
 import com.jarves.mh.model.ToolRequest
 import com.jarves.mh.model.WorkspaceEntry
 import com.jarves.mh.model.GitHubRepository
+import com.jarves.mh.model.InterruptedSession
 import com.jarves.mh.model.projectSlug
 import com.jarves.mh.model.generateQuickChatIdentity
 import com.jarves.mh.model.providerProtocolForAgent
@@ -217,6 +221,10 @@ data class AppUiState(
     val agentKind: AgentKind = AgentKind.CLAUDE_CODE,
     val primaryAgentKind: AgentKind = AgentKind.CLAUDE_CODE,
     val autonomyMode: AgentAutonomyMode = AgentAutonomyMode.APPROVE_RISKY,
+    /** Task that was in flight when the OS killed the app (ISSUE-007): shown as a resume banner. */
+    val interruptedSession: InterruptedSession? = null,
+    /** True once repeated interruptions cross the battery-optimization guidance threshold (innovation 3). */
+    val repeatedInterruptions: Boolean = false,
     val installedAgentVersions: Map<AgentKind, String> = emptyMap(),
     val agentInstalling: AgentKind? = null,
     val agentMessage: String? = null,
@@ -249,10 +257,20 @@ data class AppUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val vault = ApiKeyVault(application)
     private val preferences = AppPreferences(application)
+    /** Session journal (ISSUE-007): detects tasks interrupted by process death and powers the resume banner. */
+    private val sessionJournal = SessionJournal(File(application.filesDir, "sessions"))
     private val claudeRuntime = ClaudeRuntimeBridge(
         application,
         secretFor = { profile -> vault.get(profile.kind.name) },
         autonomyProvider = { preferences.agentAutonomyMode },
+        saveConversationId = { projectId, claudeSessionId ->
+            // Persist per chat (the same mechanism Antigravity uses) and mirror onto
+            // the session journal so a process death can still find the id (ISSUE-007).
+            _state.value.activeChatId?.let { chatId ->
+                preferences.saveAgentConversation(AgentKind.CLAUDE_CODE, projectId, chatId, claudeSessionId)
+            }
+            sessionJournal.recordAgentSession(claudeSessionId)
+        },
     )
     private val dshRuntime = DshRuntimeBridge(
         application,
@@ -269,6 +287,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         },
         saveConversationId = { projectId, id ->
             _state.value.activeChatId?.let { preferences.saveAgentConversation(AgentKind.ANTIGRAVITY, projectId, it, id) }
+            sessionJournal.recordAgentSession(id)
         },
         autonomyProvider = { preferences.agentAutonomyMode },
     )
@@ -422,6 +441,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (cleanedProjects.size != loadedProjects.size) {
             preferences.saveProjects(cleanedProjects)
             _state.update { it.copy(projects = cleanedProjects) }
+        }
+        // A journal that survived this app start means the OS killed the process
+        // mid-task (ISSUE-007): surface the resume banner before anything else.
+        sessionJournal.read()?.let(::surfaceInterruptedSession)
+    }
+
+    /** Turns a leftover journal entry into the interrupted-task banner (ISSUE-007). */
+    private fun surfaceInterruptedSession(entry: JournalEntry) {
+        val kind = AgentKind.fromStored(entry.agentKind)
+        // The journal copy wins; the per-chat preference is the fallback for the
+        // rare kill that happened before any agent id was mirrored onto the journal.
+        val nativeId = entry.agentSessionId
+            ?: entry.chatId?.let { preferences.loadAgentConversation(kind, entry.projectId, it) }
+        val observed = sessionJournal.noteInterruptionObserved(entry.startedAt)
+        _state.update {
+            it.copy(
+                interruptedSession = InterruptedSession(
+                    agentKind = kind,
+                    projectId = entry.projectId,
+                    projectSlug = entry.projectSlug,
+                    request = entry.request,
+                    startedAtMillis = entry.startedAt,
+                    canResumeNatively = !nativeId.isNullOrBlank() && kind != AgentKind.DEEPSEEK_HARNESS,
+                ),
+                repeatedInterruptions = observed >= SessionJournal.INTERRUPTIONS_BEFORE_BATTERY_HINT,
+            )
         }
     }
 
@@ -3074,6 +3119,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             history = history,
             provider = state.value.provider,
         )
+        // Journal the in-flight task so a process death can be detected and the
+        // resume banner offered (ISSUE-007). One small atomic write per task start;
+        // the raw user text (not the attachment-augmented prompt) is stored.
+        sessionJournal.begin(
+            JournalEntry(
+                agentKind = _state.value.agentKind.stableId,
+                projectId = project.id,
+                projectSlug = project.slug,
+                chatId = _state.value.activeChatId,
+                request = requestText,
+                // Seed with the agent id a previous turn may have recorded, so a
+                // kill before this turn's init event can still resume natively.
+                agentSessionId = _state.value.activeChatId?.let { chatId ->
+                    preferences.loadAgentConversation(_state.value.agentKind, project.id, chatId)
+                },
+                startedAt = System.currentTimeMillis(),
+            ),
+        )
+        // Starting fresh work retires any stale interruption banner.
+        _state.update { it.copy(interruptedSession = null) }
         viewModelScope.launch {
             activeRuntimeRequest?.let { request ->
                 request.runtime.startSession(
@@ -3105,6 +3170,69 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopTask() {
         if (!_state.value.isRunning) return
         viewModelScope.launch { activeRuntime().stopActiveSession() }
+    }
+
+    /**
+     * One-tap resume of a task interrupted by process death (ISSUE-007): reopens
+     * the recorded project and chat, arms a native --resume for Claude Code when
+     * its session id was captured, and re-sends the task. Antigravity resumes
+     * natively through its stored conversation id; DeepSeek Harness rebuilds
+     * context from the persisted transcript.
+     */
+    fun resumeInterruptedTask() {
+        val entry = sessionJournal.read() ?: run {
+            dismissInterruptedTask()
+            return
+        }
+        val current = _state.value
+        if (current.isRunning) return
+        if (current.projectTerminalRunning && current.activeProject?.id != entry.projectId) {
+            _state.update { it.copy(toastMessage = "Stop the running terminal before resuming.") }
+            return
+        }
+        val kind = AgentKind.fromStored(entry.agentKind)
+        val project = current.projects.firstOrNull { it.id == entry.projectId }
+        if (project == null) {
+            _state.update { it.copy(toastMessage = "The interrupted project no longer exists.") }
+            dismissInterruptedTask()
+            return
+        }
+        if (current.agentKind != kind) selectAgent(kind)
+        if (_state.value.activeProject?.id != entry.projectId) openProject(project)
+        entry.chatId?.takeIf { it != _state.value.activeChatId }?.let { chatId ->
+            if (_state.value.projectChats.any { it.id == chatId }) switchChat(chatId)
+        }
+        // Claude Code can continue its own conversation context when the session
+        // id was captured before the kill; the other agents rebuild from the
+        // persisted transcript (Antigravity already passes its stored id itself).
+        val nativeId = entry.agentSessionId
+            ?: _state.value.activeChatId?.let { preferences.loadAgentConversation(kind, entry.projectId, it) }
+        if (kind == AgentKind.CLAUDE_CODE && !nativeId.isNullOrBlank()) {
+            claudeRuntime.requestResume(nativeId)
+        }
+        sessionJournal.clear()
+        sendPrompt(SessionJournalCodec.resumeRequestText(entry))
+    }
+
+    /** Dismisses the interrupted-task banner and drops the journal marker (ISSUE-007). */
+    fun dismissInterruptedTask() {
+        sessionJournal.clear()
+        _state.update { it.copy(interruptedSession = null) }
+    }
+
+    /**
+     * Repeated interruptions usually mean the device's power manager is killing
+     * the app mid-task; send the user straight to the exemption list (innovation 3).
+     */
+    fun openBatteryOptimizationSettings() {
+        runCatching {
+            getApplication<Application>().startActivity(
+                Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }.onFailure {
+            _state.update { it.copy(toastMessage = "Could not open the battery optimization settings.") }
+        }
     }
 
     fun undoLastChanges() {
@@ -3450,6 +3578,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (event is RuntimeEvent.SessionCompleted || event is RuntimeEvent.SessionFailed) {
             activeRuntimeRequest = null
             failedApiKeyIds.clear()
+            // The task is no longer in flight: drop the journal marker so the next
+            // app start does not mistake this for an interruption, and clear the
+            // strike counter on success (ISSUE-007) — only repeated interruptions,
+            // not a healthy workload, should ever trigger battery guidance.
+            sessionJournal.clear()
+            if (event is RuntimeEvent.SessionCompleted) sessionJournal.resetInterruptions()
         }
         if (event is RuntimeEvent.FilesChanged || event is RuntimeEvent.SessionCompleted) {
             _state.value.activeProject?.id?.let { touchProject(it) }
