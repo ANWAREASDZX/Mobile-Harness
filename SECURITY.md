@@ -48,6 +48,10 @@ For OpenAI-protocol providers, a tiny local gateway listens on `127.0.0.1` (ephe
 
 The Antigravity auto-updater manifest and the npm registry are treated as *data sources*, not trust anchors: an update is only offered when the target version's tarball digest is pinned inside the app build (`VerifiedAgentReleases`), the download is verified against that pinned digest, and dsh installs from the verified local tarball instead of an open-ended `npm install`. A compromised endpoint can at worst serve a byte-identical copy of a binary this app already shipped. The long-term fix is Ed25519-signed manifests (roadmap 3k).
 
+### 6. Conversation storage is bounded, and terminal history is scrubbed at rest (v1.3.0)
+
+Chats live in a SQLite database inside the app's private storage (same File-Based Encryption as before, no new permissions). Storage is bounded per chat (2,000 messages, 100 KB per message body, 100 chats per project — oldest entries drop first, mirroring the long-standing 100-line terminal history cap). Credentials that look like API keys, tokens, or passwords are stripped from the terminal history **before it is written to disk**; the live terminal you are reading is not modified. Two honest trade-offs: (a) the redaction is pattern-based, so a long random-looking constant in code you `cat` through the terminal may occasionally be masked in the restored scrollback, and (b) conversations beyond the caps exist only in memory until they age out — if you need a permanent transcript, export the project. Upgrading from earlier versions imports every existing chat into the store once, verified, and only then removes the old JSON files; rolling back to a pre-1.3.0 build will therefore show old chats as empty (the data itself remains in the database).
+
 ## What Is Already Hardened
 
 - Provider keys at rest are encrypted with **AES-256-GCM** keys held in **Android Keystore** (hardware-backed where available).
@@ -59,4 +63,5 @@ The Antigravity auto-updater manifest and the npm registry are treated as *data 
 - The project preview WebView blocks all non-loopback navigation and requests, with file/content access explicitly disabled.
 - Agent permission requests travel through a fail-closed bridge: unreadable, malformed, or timed-out requests are denied, and the default mode never writes an always-allow decision into the guest.
 - Workspaces have bounded checkpoints: files above 64 MB (or projects above a 256 MB baseline budget) are not copied; Undo is honestly reported as unavailable for them instead of silently destroying the file.
+- Conversations are stored in a bounded SQLite store with per-chat and per-message caps, and terminal history saved to disk is scrubbed of credential-shaped values (v1.3.0, §6).
 - The release build is shrunk and optimized with R8, and debug/verbose logging (including any raw agent output) is stripped from release logcat.

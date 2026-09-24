@@ -14,6 +14,7 @@ import com.jarves.mh.BuildConfig
 import com.jarves.mh.data.ApiKeyVault
 import com.jarves.mh.data.ApiKeyInfo
 import com.jarves.mh.data.AppPreferences
+import com.jarves.mh.data.SecretRedactor
 import com.jarves.mh.model.ActivityItem
 import com.jarves.mh.model.AgentAutonomyMode
 import com.jarves.mh.model.AgentKind
@@ -829,8 +830,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 array.put(
                     JSONObject()
                         .put("id", line.id)
-                        .put("command", line.command)
-                        .put("output", line.output.takeLast(MAX_PROJECT_TERMINAL_OUTPUT))
+                        // ISSUE-021: credentials are stripped before anything
+                        // reaches disk; the live terminal stays untouched and
+                        // only the restored scrollback is redacted.
+                        .put("command", SecretRedactor.redact(line.command))
+                        .put("output", SecretRedactor.redact(line.output.takeLast(MAX_PROJECT_TERMINAL_OUTPUT)))
                         .put("exitCode", line.exitCode),
                 )
             }
