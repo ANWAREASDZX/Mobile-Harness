@@ -388,3 +388,13 @@ data class ActivityItem(
     val isComplete: Boolean = true,
     val isCommand: Boolean = false,
 )
+
+/** A repository entry as reported by the official GitHub CLI (moved out of the retired GitHubClient). */
+data class GitHubRepository(
+    val fullName: String,
+    val cloneUrl: String,
+    val private: Boolean,
+    val defaultBranch: String,
+    val description: String,
+    val updatedAt: String,
+)

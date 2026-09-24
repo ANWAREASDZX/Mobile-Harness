@@ -6,7 +6,6 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.os.SystemClock
 import android.os.Build
-import android.system.Os
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.core.content.ContextCompat
@@ -30,13 +29,13 @@ import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.model.RuntimeEvent
 import com.jarves.mh.model.ToolRequest
 import com.jarves.mh.model.WorkspaceEntry
+import com.jarves.mh.model.GitHubRepository
 import com.jarves.mh.model.projectSlug
 import com.jarves.mh.model.generateQuickChatIdentity
 import com.jarves.mh.model.providerProtocolForAgent
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.network.ProviderApiClient
-import com.jarves.mh.network.GitHubRepository
 import com.jarves.mh.runtime.ClaudeRuntimeBridge
 import com.jarves.mh.runtime.DshRuntimeBridge
 import com.jarves.mh.runtime.AgentRegistry
@@ -46,6 +45,7 @@ import com.jarves.mh.runtime.AntigravityAuthState
 import com.jarves.mh.runtime.AntigravityAuthStatus
 import com.jarves.mh.runtime.AntigravityRuntimeBridge
 import com.jarves.mh.runtime.NativeSpawnProcess
+import com.jarves.mh.runtime.OutputFileTailer
 import com.jarves.mh.runtime.RuntimeInstallProgress
 import com.jarves.mh.runtime.RuntimeInstaller
 import com.jarves.mh.runtime.RuntimeSetupController
@@ -57,7 +57,6 @@ import com.jarves.mh.runtime.AndroidAppInstaller
 import com.jarves.mh.update.AppUpdateInfo
 import com.jarves.mh.update.AppUpdater
 import java.io.File
-import java.io.RandomAccessFile
 import java.net.UnknownHostException
 import java.net.URI
 import java.nio.file.Files
@@ -481,24 +480,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     terminalProcess = proc
                     val native = proc as? NativeSpawnProcess
-                    var offset = 0L
                     val streamed = StringBuilder()
                     var autoConfirmed = false
-                    while (proc.isAlive || (native?.outputFile?.length() ?: 0L) > offset) {
-                        val file = native?.outputFile
-                        val available = (file?.length() ?: 0L) - offset
-                        if (file == null || available <= 0) {
-                            Thread.sleep(50)
-                            continue
-                        }
-                        val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
-                        val count = RandomAccessFile(file, "r").use { input ->
-                            input.seek(offset)
-                            input.read(bytes)
-                        }
-                        if (count > 0) {
-                            offset += count
-                            streamed.append(bytes.decodeToString(0, count))
+                    val outputFile = native?.outputFile
+                    if (outputFile == null) {
+                        // Defensive: a non-native process cannot be tailed; wait
+                        // for its exit instead of spinning (ISSUE-013).
+                        proc.waitFor()
+                    } else {
+                        OutputFileTailer.tailChunks(outputFile, proc::isAlive) { chunk ->
+                            streamed.append(chunk)
                             _terminalLiveOutput.value = sanitizeTerminalOutput(streamed.toString())
                                 .trimEnd()
                                 .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
@@ -694,40 +685,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (projectTerminalStopRequested) process.destroy()
         val native = process as? NativeSpawnProcess
             ?: return ProjectTerminalResult("Unsupported terminal process.", 1, cwd)
-        var offset = 0L
         val output = StringBuilder()
         var autoConfirmed = false
-        while (process.isAlive || native.outputFile.length() > offset) {
-            val available = native.outputFile.length() - offset
-            if (available <= 0) {
-                Thread.sleep(50)
-                continue
+        OutputFileTailer.tailChunks(native.outputFile, process::isAlive) { chunk ->
+            output.append(chunk)
+            val visible = sanitizeTerminalOutput(output.toString().substringBefore(marker))
+                .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
+            if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, visible)) {
+                process.outputStream.write("y\n".toByteArray())
+                process.outputStream.flush()
+                autoConfirmed = true
             }
-            val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
-            val count = RandomAccessFile(native.outputFile, "r").use { file ->
-                file.seek(offset)
-                file.read(bytes)
-            }
-            if (count > 0) {
-                offset += count
-                output.append(bytes.decodeToString(0, count))
-                val visible = sanitizeTerminalOutput(output.toString().substringBefore(marker))
-                    .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
-                if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, visible)) {
-                    process.outputStream.write("y\n".toByteArray())
-                    process.outputStream.flush()
-                    autoConfirmed = true
-                }
-                val detectedPreviewUrl = detectPreviewUrl(visible)
-                _state.update { current ->
-                    if (current.activeProject?.id == projectId) {
-                        current.copy(
-                            projectTerminalLiveOutput = visible,
-                            previewReady = current.previewReady || detectedPreviewUrl != null,
-                            previewUrl = detectedPreviewUrl ?: current.previewUrl,
-                        )
-                    } else current
-                }
+            val detectedPreviewUrl = detectPreviewUrl(visible)
+            _state.update { current ->
+                if (current.activeProject?.id == projectId) {
+                    current.copy(
+                        projectTerminalLiveOutput = visible,
+                        previewReady = current.previewReady || detectedPreviewUrl != null,
+                        previewUrl = detectedPreviewUrl ?: current.previewUrl,
+                    )
+                } else current
             }
         }
         val exitCode = process.waitFor()
@@ -2383,33 +2360,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         outputFile = outputFile,
                     )
                     githubAuthProcess = process
-                    var offset = 0L
                     val captured = StringBuilder()
                     var browserOpened = false
                     try {
-                        while (process.isAlive || outputFile.length() > offset) {
-                            if (outputFile.length() > offset) {
-                                val count = (outputFile.length() - offset).coerceAtMost(16L * 1024).toInt()
-                                val bytes = ByteArray(count)
-                                RandomAccessFile(outputFile, "r").use { file -> file.seek(offset); file.readFully(bytes) }
-                                offset += count
-                                captured.append(bytes.toString(Charsets.UTF_8))
-                                val clean = sanitizeTerminalOutput(captured.toString()).takeLast(20_000)
-                                val code = GITHUB_DEVICE_CODE.find(clean)?.value
-                                if (code != null && !browserOpened) {
-                                    browserOpened = true
-                                    _state.update {
-                                        it.copy(
-                                            githubAuthStatus = GitHubAuthStatus.AWAITING_USER,
-                                            githubUserCode = code,
-                                            githubVerificationUri = GITHUB_DEVICE_URL,
-                                            githubMessage = "Enter this one-time code on GitHub",
-                                        )
-                                    }
-                                    openExternalUrl(GITHUB_DEVICE_URL)
+                        OutputFileTailer.tailChunks(outputFile, process::isAlive) { chunk ->
+                            captured.append(chunk)
+                            val clean = sanitizeTerminalOutput(captured.toString()).takeLast(20_000)
+                            val code = GITHUB_DEVICE_CODE.find(clean)?.value
+                            if (code != null && !browserOpened) {
+                                browserOpened = true
+                                _state.update {
+                                    it.copy(
+                                        githubAuthStatus = GitHubAuthStatus.AWAITING_USER,
+                                        githubUserCode = code,
+                                        githubVerificationUri = GITHUB_DEVICE_URL,
+                                        githubMessage = "Enter this one-time code on GitHub",
+                                    )
                                 }
-                            } else {
-                                delay(100)
+                                openExternalUrl(GITHUB_DEVICE_URL)
                             }
                         }
                         val exit = process.waitFor()
@@ -2421,6 +2389,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         githubAuthProcess = null
                         outputFile.delete()
                     }
+                    // ISSUE-005: gh's --insecure-storage keeps the OAuth token in
+                    // plain text inside the guest. Move it to the hardware-backed
+                    // vault, log gh out of the guest, and hand the token to every
+                    // later gh invocation transiently via GH_TOKEN — nothing
+                    // secret ever rests on the guest filesystem.
+                    val token = runGitHubCli(listOf("auth", "token")).second
+                        .lineSequence().lastOrNull { it.isNotBlank() }?.trim()
+                    check(!token.isNullOrBlank()) { "GitHub connected, but the session token could not be read" }
+                    vault.put(GITHUB_TOKEN_PROVIDER_ID, token)
+                    runCatching { runGitHubCli(listOf("auth", "logout", "--hostname", "github.com")) }
                     githubAccountLogin() ?: error("GitHub connected, but the account could not be identified")
                 }
             }
@@ -2508,6 +2486,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     val output = runGitHubCli(command)
                     check(output.first == 0) { output.second.lineSequence().lastOrNull { it.isNotBlank() } ?: "GitHub logout failed" }
+                    // The vault copy leaves with the session (ISSUE-005).
+                    vault.remove(GITHUB_TOKEN_PROVIDER_ID)
                 }
             }
             result.onSuccess {
@@ -2546,13 +2526,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun githubCliEnvironment(): Map<String, String> = mapOf(
-        "GH_PROMPT_DISABLED" to "1",
-        "GH_NO_UPDATE_NOTIFIER" to "1",
-        // Android PRoot has no Secret Service. This keeps the official gh-owned
-        // credential in Mobile Harness's private Linux home instead of exporting it.
-        "BROWSER" to "/bin/false",
-    )
+    private fun githubCliEnvironment(): Map<String, String> {
+        val environment = mutableMapOf(
+            "GH_PROMPT_DISABLED" to "1",
+            "GH_NO_UPDATE_NOTIFIER" to "1",
+            // Android PRoot has no Secret Service. This keeps the official gh-owned
+            // credential in Mobile Harness's private Linux home instead of exporting it.
+            "BROWSER" to "/bin/false",
+        )
+        // ISSUE-005: when the vault holds the OAuth token it is injected per
+        // process only — gh never keeps a credential file inside the guest.
+        vault.get(GITHUB_TOKEN_PROVIDER_ID)?.takeIf(String::isNotBlank)?.let { token ->
+            environment["GH_TOKEN"] = token
+        }
+        return environment
+    }
 
     private fun runGitHubCli(arguments: List<String>): Pair<Int, String> {
         check(installer.isGitHubCliInstalled()) { "GitHub CLI is not installed" }
@@ -3594,6 +3582,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val MAX_IMPORTED_PROJECT_BYTES = 8L * 1024L * 1024L * 1024L
         private const val MAX_IMPORTED_ZIP_ENTRIES = 100_000
         private const val LEGACY_GITHUB_TOKEN_KEY = "GITHUB_APP"
+
+        /** Vault entry holding the gh OAuth token so it never rests inside the guest (ISSUE-005). */
+        private const val GITHUB_TOKEN_PROVIDER_ID = "github-oauth"
         private const val GITHUB_DEVICE_URL = "https://github.com/login/device"
         private val GITHUB_DEVICE_CODE = Regex("\\b[A-Z0-9]{4}-[A-Z0-9]{4}\\b")
         private const val TEST_PROVIDER_DEFAULTS_VERSION = 1

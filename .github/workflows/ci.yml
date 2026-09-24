@@ -1,9 +1,10 @@
-# Mobile Harness CI (roadmap 019a — window 1, merged before everything else).
+# Mobile Harness CI (roadmap 019a — window 1; 3m additions in window 2).
 #
-# Three independent gates:
+# Four independent gates:
 #   1. unit-tests   — JVM unit tests (fast signal, no Android SDK assets needed)
 #   2. native-check — strict gcc syntax check of the JNI spawn layer
-#   3. debug-build  — full assembleDebug including the pinned runtime bundles
+#   3. hygiene      — file-size guard (ISSUE-014) + CycloneDX SBOM (ISSUE-019)
+#   4. debug-build  — full assembleDebug including the pinned runtime bundles
 #                     (downloaded from the GitHub release and SHA-256 verified)
 #
 # Rollback for the whole workflow = disable this file; no app code depends on it.
@@ -57,6 +58,24 @@ jobs:
           gcc -Wall -Wextra -fsyntax-only \
             -I "$JAVA_HOME/include" -I "$JAVA_HOME/include/linux" \
             app/src/main/cpp/pocket_spawn.c
+
+  hygiene:
+    name: Size guard + SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: File-size guard (no new god classes, ISSUE-014)
+        run: python3 .github/scripts/check_file_sizes.py
+      - name: Generate CycloneDX SBOM (ISSUE-019, roadmap 3m)
+        run: |
+          python3 scripts/generate_sbom.py . > sbom.json
+          python3 -c "import json;json.load(open('sbom.json'))"
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+          if-no-files-found: error
 
   debug-build:
     name: Debug build

@@ -8,7 +8,6 @@ import android.content.Intent
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.jarves.mh.MainActivity
 import com.jarves.mh.R
@@ -35,7 +34,6 @@ internal object RuntimeTaskController {
 }
 
 class RuntimeExecutionService : Service() {
-    private var wakeLock: PowerManager.WakeLock? = null
     private var projectName: String = "your project"
     private var notificationTitle: String = "Mobile Harness is working"
     private var canStop: Boolean = true
@@ -82,7 +80,6 @@ class RuntimeExecutionService : Service() {
             )
             ACTION_CANCELLED -> {
                 taskRunning = false
-                releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -93,7 +90,10 @@ class RuntimeExecutionService : Service() {
                     RUNNING_NOTIFICATION_ID,
                     runningNotification("Claude Code is working in $projectName", includeStop = canStop),
                 )
-                acquireWakeLock()
+                // ISSUE-013: this service is a notification shell only. The CPU
+                // wake lock is held by the bridge running the session
+                // (TaskWakeLocks), so it lives exactly as long as real work —
+                // not a flat 90 minutes per notification.
             }
         }
         return START_NOT_STICKY
@@ -141,7 +141,6 @@ class RuntimeExecutionService : Service() {
 
     private fun finishTask(title: String, detail: String, failed: Boolean) {
         taskRunning = false
-        releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         val notification = NotificationCompat.Builder(this, RESULT_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
@@ -166,20 +165,7 @@ class RuntimeExecutionService : Service() {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
-    private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        wakeLock = getSystemService(PowerManager::class.java)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "com.jarves.mh:active-coding-task")
-            .apply { acquire(MAX_WAKE_LOCK_MS) }
-    }
-
-    private fun releaseWakeLock() {
-        wakeLock?.takeIf { it.isHeld }?.release()
-        wakeLock = null
-    }
-
     override fun onDestroy() {
-        releaseWakeLock()
         super.onDestroy()
     }
 
@@ -202,7 +188,6 @@ class RuntimeExecutionService : Service() {
         private const val RESULT_CHANNEL_ID = "task-results"
         private const val RUNNING_NOTIFICATION_ID = 41
         private const val RESULT_NOTIFICATION_ID = 42
-        private const val MAX_WAKE_LOCK_MS = 90 * 60 * 1_000L
         private const val STOP_SAFEGUARD_MS = 10_000L
 
         fun ensureNotificationChannels(context: android.content.Context) {

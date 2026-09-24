@@ -24,7 +24,7 @@ Three modes are selectable in Settings → Agent permissions, and the choice app
 
 The approval channel itself is **fail-closed**: a corrupt or unreadable permission request, a dead bridge, or a timeout always results in `deny` — never `allow`.
 
-Consequence regardless of mode: treat **imported repositories** and pasted prompts from unknown sources as untrusted. A README, a test fixture, or a tool output can carry prompt-injection instructions that the agent may act on — in careful modes it will ask you (verify what you approve!), in the autonomous mode it will simply act. Your provider API key is exposed to the guest environment (see §3 below), so a prompt-injected command could exfiltrate it.
+Consequence regardless of mode: treat **imported repositories** and pasted prompts from unknown sources as untrusted. A README, a test fixture, or a tool output can carry prompt-injection instructions that the agent may act on — in careful modes it will ask you (verify what you approve!), in the autonomous mode it will simply act.
 
 ### 2. Read-only Android system binds inside the guest
 
@@ -32,20 +32,31 @@ The guest binds `/system`, `/apex`, `/vendor`, and `/product` from the host Andr
 
 Impact: guest processes (and therefore the agents) can **read** Android system files, but cannot write them; PRoot confines all writes to the app sandbox. This is a deliberate, bounded architectural trade-off, documented here so it is a decision rather than an accident.
 
-### 3. Provider API keys reach the guest via environment variables
+### 3. Provider credentials stay on the host side (v1.2.0 — sovereign proxy)
 
-The active provider key is passed in the process environment of the agent process (visible via `/proc/<pid>/environ` to other processes inside the same guest). This is how the official CLIs accept credentials and is a known limitation of the current architecture. A local signing proxy that keeps keys inside the Android Keystore is the planned fix.
+Claude Code and DeepSeek Harness custom routes no longer receive the real provider key. A loopback **sovereign proxy** holds the key inside the app process, injects it only when talking to the real upstream, and hands the guest a random per-session `http://127.0.0.1:<port>/t/<token>` URL plus a placeholder value — so `/proc/*/environ` inside the guest exposes no secrets. OpenAI-protocol providers keep using the format gateway, which already held the key host-side; since v1.2.0 their guest env also carries only the placeholder.
 
-### 4. Local gateway on loopback, tokened per session (v1.1.0)
+One documented exception remains: **dsh's native `deepseek-official` route** has no configurable base URL inside the CLI, so its key still travels via environment for that single provider. The full fix (pinned digests, roadmap 3k) is tracked with the Ed25519-signed manifest work.
 
-For OpenAI-protocol providers, a tiny local gateway listens on `127.0.0.1` (ephemeral port) to translate the wire format. Since v1.1.0 every gateway URL carries a random 128-bit path token (`/t/<token>/…`) that other apps on the device must present or receive `403`; request bodies are capped at 2 MB, header lines at 16 KB, and connections run on a small fixed thread pool. The residual limitation: like every loopback listener on Android, the port itself is reachable from other apps on the same device during an active session — but without the token they can neither use the gateway nor the provider key behind it.
+GitHub sign-in follows the same principle (v1.2.0): the gh OAuth token is moved into the Android Keystore vault, gh is logged out inside the guest, and every later gh invocation receives the token transiently via `GH_TOKEN` — nothing secret rests in the guest filesystem.
+
+### 4. Local gateways on loopback, tokened per session (v1.1.0)
+
+For OpenAI-protocol providers, a tiny local gateway listens on `127.0.0.1` (ephemeral port) to translate the wire format. Since v1.1.0 every gateway URL carries a random 128-bit path token (`/t/<token>/…`) that other apps on the device must present or receive `403`; request bodies are capped at 2 MB, header lines at 16 KB, and connections run on a small fixed thread pool. The sovereign proxy (§3) applies the same token and caps (32 MB body limit, sized for image-bearing requests). The residual limitation: like every loopback listener on Android, the port itself is reachable from other apps on the same device during an active session — but without the token they can neither use the gateway nor the provider key behind it.
+
+### 5. Agent updates install only releases this app build has verified (v1.2.0)
+
+The Antigravity auto-updater manifest and the npm registry are treated as *data sources*, not trust anchors: an update is only offered when the target version's tarball digest is pinned inside the app build (`VerifiedAgentReleases`), the download is verified against that pinned digest, and dsh installs from the verified local tarball instead of an open-ended `npm install`. A compromised endpoint can at worst serve a byte-identical copy of a binary this app already shipped. The long-term fix is Ed25519-signed manifests (roadmap 3k).
 
 ## What Is Already Hardened
 
 - Provider keys at rest are encrypted with **AES-256-GCM** keys held in **Android Keystore** (hardware-backed where available).
-- All runtime bundle downloads (rootfs, agents, toolchains) are verified against **SHA-256/SHA-512 checksums pinned in the app** before extraction; interrupted downloads resume rather than restart.
+- Since v1.2.0 the **active key never enters the guest environment** for Claude Code and dsh custom routes (sovereign proxy, §3); the GitHub OAuth token lives in the same vault.
+- All runtime bundle downloads (rootfs, agents, toolchains) are verified against **SHA-256/SHA-512 checksums pinned in the app** before extraction; interrupted downloads resume rather than restart, and downloads/extractions check free storage before writing (570 MB archives fail with a clear message instead of a half-broken install).
+- Agent in-app updates are additionally restricted to **per-release pinned digests** (§5).
 - In-app self-updates verify the **signing certificate, versionCode, and SHA-256** of the downloaded APK before offering installation.
 - Archive extraction enforces path-traversal protection with a canonical-prefix check, and rejects symlink escapes.
 - The project preview WebView blocks all non-loopback navigation and requests, with file/content access explicitly disabled.
 - Agent permission requests travel through a fail-closed bridge: unreadable, malformed, or timed-out requests are denied, and the default mode never writes an always-allow decision into the guest.
+- Workspaces have bounded checkpoints: files above 64 MB (or projects above a 256 MB baseline budget) are not copied; Undo is honestly reported as unavailable for them instead of silently destroying the file.
 - The release build is shrunk and optimized with R8, and debug/verbose logging (including any raw agent output) is stripped from release logcat.

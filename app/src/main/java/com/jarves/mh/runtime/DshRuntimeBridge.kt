@@ -11,12 +11,15 @@ import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.model.RuntimeEvent
 import com.jarves.mh.model.ToolRequest
 import java.io.File
-import java.io.RandomAccessFile
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.withContext
@@ -53,6 +56,8 @@ class DshRuntimeBridge(
     @Volatile private var activeSessionId: String? = null
     @Volatile private var userStopRequested: Boolean = false
     @Volatile private var activeProjectSlug: String? = null
+    /** Sovereign proxy of the running session; closed on every exit path (ISSUE-010). */
+    @Volatile private var sovereignProxyForSession: SovereignProxy? = null
     @Volatile private var taskStartedAtElapsedRealtime: Long = 0L
     @Volatile private var lastForegroundProgressAt: Long = 0L
     @Volatile private var foregroundResultPosted: Boolean = false
@@ -97,6 +102,17 @@ class DshRuntimeBridge(
                     }.start()
                 }
             }
+            // Task-scoped resources (ISSUE-013).
+            TaskWakeLocks.acquire(context, "session:$sessionId")
+            ThermalMonitor.start(context) { status ->
+                eventBus.tryEmit(
+                    RuntimeEvent.RuntimeLog(
+                        sessionId,
+                        "Device is thermal throttling",
+                        "The device is running hot (level $status of 6). The agent may work slower until it cools down.",
+                    ),
+                )
+            }
             startForegroundRuntime(projectSlug, sessionId)
             val installed = installer.installedRuntime()
             check(installer.isAgentInstalled(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS)) {
@@ -107,7 +123,29 @@ class DshRuntimeBridge(
             checkpoints.createCheckpoint(projectId, workspace)
             val before = checkpoints.snapshot(workspace)
             val route = DshRouteMapper.forProfile(provider)
-            writeDshSettings(installed.rootfs, route, provider)
+            // Sovereign proxy (ISSUE-010): custom dsh routes point at the local
+            // proxy, which holds the real key on the host side. The native
+            // "deepseek-official" route has no configurable base URL inside dsh,
+            // so its key still travels via env — the one documented exception
+            // (see SECURITY.md, roadmap 3a residual).
+            val sovereignProxy = if (route.custom != null) {
+                // dsh talks to custom routes directly (no app-side format
+                // gateway), so the proxy is built explicitly for the route's
+                // upstream — including the OpenAI-wire providers.
+                SovereignProxy(
+                    upstreamBaseUrl = route.custom.baseUrl,
+                    credentialStyle = ProxyCredentialStyle.KEY_AND_BEARER,
+                    apiKey = secret,
+                    projectKey = projectSlug,
+                ).start()
+            } else null
+            sovereignProxyForSession = sovereignProxy
+            writeDshSettings(
+                installed.rootfs,
+                route,
+                provider,
+                proxyBaseUrl = sovereignProxy?.url,
+            )
             val environment = linkedMapOf(
                 "DSH_HOME" to DSH_HOME_GUEST_PATH,
                 // Autonomy mode (ISSUE-001): only the explicit FULLY_AUTONOMOUS
@@ -115,13 +153,13 @@ class DshRuntimeBridge(
                 // in its default mode and denies tool calls that have no
                 // approval channel instead of approving them.
                 "DSH_PERMISSION_MODE" to AgentPermissions.dshPermissionMode(autonomyProvider()),
-                route.keyEnv to secret,
+                route.keyEnv to (sovereignProxy?.let { PROXY_MANAGED_SECRET } ?: secret),
             )
             if (route.keyEnv != FALLBACK_KEY_ENV) environment.remove(FALLBACK_KEY_ENV)
 
             val guestWorkspacePath = "/workspace/$projectSlug"
             val contextPrompt = buildContextPrompt(prompt, conversationHistory, guestWorkspacePath, projectKind)
-            val command = listOf("/usr/local/bin/dsh", "--profile", "sdk")
+            val command = listOf(AgentProfiles.DEEPSEEK_HARNESS.executable, "--profile", "sdk")
             // Route/model diagnostics must not reach logcat in release builds (ISSUE-004).
             AppLog.d("DshBridge", "Route: ${route.name}, Model: ${provider.model}")
             val process = installer.process(
@@ -184,6 +222,10 @@ class DshRuntimeBridge(
         }
         activeProcess = null
         activeSessionId = null
+        sovereignProxyForSession?.close()
+        sovereignProxyForSession = null
+        TaskWakeLocks.release("session:$sessionId")
+        ThermalMonitor.stop()
         RuntimeTaskController.unregister(sessionId)
         sessionId
     }
@@ -200,14 +242,11 @@ class DshRuntimeBridge(
             ?: error("Unsupported Android runtime process")
         val writer = process.outputStream.bufferedWriter()
         val parser = DshSdkProtocolParser(sessionId)
-        var outputOffset = 0L
-        val pendingOutput = StringBuilder()
         var promptSent = false
         var sawRunning = false
         var completed = false
         var sawActivity = false
-        var shutdownSent = false
-        var shutdownSentAt = 0L
+        val shutdownSentAt = AtomicLong(0L)
         var inputClosed = false
         var failure = ""
 
@@ -257,13 +296,12 @@ class DshRuntimeBridge(
                     if (protocolEvent.running) {
                         sawRunning = true
                         pushForegroundProgress("DeepSeek Harness is working…")
-                    } else if (sawRunning && !shutdownSent) {
+                    } else if (sawRunning && shutdownSentAt.get() == 0L) {
                         completed = sawActivity && failure.isBlank()
                         if (!completed && failure.isBlank()) {
                             failure = "DeepSeek Harness stopped before processing the prompt"
                         }
-                        shutdownSent = true
-                        shutdownSentAt = android.os.SystemClock.elapsedRealtime()
+                        shutdownSentAt.set(android.os.SystemClock.elapsedRealtime())
                         send("shutdown", SDK_SHUTDOWN_ID)
                     }
                 }
@@ -301,38 +339,31 @@ class DshRuntimeBridge(
             }
         }
 
-        while (process.isAlive || nativeProcess.outputFile.length() > outputOffset) {
-            if (
-                process.isAlive &&
-                shutdownSentAt > 0L &&
-                android.os.SystemClock.elapsedRealtime() - shutdownSentAt >= SDK_SHUTDOWN_TIMEOUT_MS
-            ) {
-                closeInput()
-                process.destroy()
+        coroutineScope {
+            // Shutdown watchdog: if dsh never acknowledges the shutdown request,
+            // close stdin and destroy the process instead of waiting forever.
+            val watchdog = launch {
+                while (kotlin.coroutines.coroutineContext.isActive) {
+                    val sentAt = shutdownSentAt.get()
+                    if (sentAt > 0L && android.os.SystemClock.elapsedRealtime() - sentAt >= SDK_SHUTDOWN_TIMEOUT_MS) {
+                        closeInput()
+                        process.destroy()
+                        break
+                    }
+                    delay(250)
+                }
             }
-            val available = nativeProcess.outputFile.length() - outputOffset
-            if (available <= 0) {
-                delay(50)
-                continue
-            }
-            val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
-            val count = RandomAccessFile(nativeProcess.outputFile, "r").use { file ->
-                file.seek(outputOffset)
-                file.read(bytes)
-            }
-            if (count <= 0) continue
-            outputOffset += count
-            pendingOutput.append(bytes.decodeToString(0, count))
-            var newline = pendingOutput.indexOf("\n")
-            while (newline >= 0) {
-                val line = pendingOutput.substring(0, newline).trimEnd('\r')
-                pendingOutput.delete(0, newline + 1)
-                if (line.isNotBlank()) handle(parser.parseLine(line))
-                newline = pendingOutput.indexOf("\n")
-            }
-        }
-        pendingOutput.toString().trim().takeIf(String::isNotBlank)?.let {
-            handle(parser.parseLine(it))
+            // The single shared tail loop (ISSUE-013) replaces this bridge's
+            // private copy of the follow-the-output-file polling loop.
+            OutputFileTailer.tailLines(
+                file = nativeProcess.outputFile,
+                isAlive = process::isAlive,
+                onLine = { line -> handle(parser.parseLine(line)) },
+                onTrailing = { trailing ->
+                    trailing.trim().takeIf(String::isNotBlank)?.let { handle(parser.parseLine(it)) }
+                },
+            )
+            watchdog.cancel()
         }
         closeInput()
         return DshSdkRunResult(completed = completed, failure = failure)
@@ -368,6 +399,9 @@ class DshRuntimeBridge(
         val paths = checkpoints.readChangedPaths(projectId).filterNot(checkpoints::isInternalRuntimePath)
         if (paths.isEmpty()) return@withContext false
         paths.forEach { path ->
+            // A file skipped by the size caps has no baseline; touching it
+            // would be destructive (ISSUE-040).
+            if (checkpoints.isUndoUnavailable(projectId, path)) return@forEach
             val target = checkpoints.safeWorkspaceFile(workspace, path)
             val original = checkpoints.safeWorkspaceFile(backup, path)
             if (original.isFile) {
@@ -395,6 +429,7 @@ class DshRuntimeBridge(
 
     override suspend fun undoFileChange(projectId: String, path: String): Boolean = withContext(Dispatchers.IO) {
         if (checkpoints.isInternalRuntimePath(path) || path !in checkpoints.readChangedPaths(projectId)) return@withContext false
+        if (checkpoints.isUndoUnavailable(projectId, path)) return@withContext false
         val workspace = checkpoints.ensureWorkspace(projectId)
         val backup = File(checkpoints.checkpointDir(projectId), "project")
         val target = checkpoints.safeWorkspaceFile(workspace, path)
@@ -425,8 +460,12 @@ class DshRuntimeBridge(
         true
     }
 
-    private fun writeDshSettings(rootfs: File, route: DshRoute, provider: ProviderProfile) {
+    private fun writeDshSettings(rootfs: File, route: DshRoute, provider: ProviderProfile, proxyBaseUrl: String? = null) {
         val home = File(rootfs, DSH_HOME_GUEST_PATH.removePrefix("/")).apply { mkdirs() }
+        // ISSUE-010: custom routes point at the sovereign proxy when present;
+        // the proxy holds the real key on the host side and forwards to the
+        // route's true upstream.
+        val routeBaseUrl = proxyBaseUrl ?: route.custom?.baseUrl
         val body = buildString {
             appendLine("agent-default-model:")
             appendLine("  provider: ${route.name}")
@@ -437,7 +476,7 @@ class DshRuntimeBridge(
                 appendLine("    ${route.name}:")
                 appendLine("      apiKeyEnv: ${route.keyEnv}")
                 appendLine("      api: ${route.custom.api}")
-                appendLine("      baseURL: ${yamlQuote(route.custom.baseUrl)}")
+                appendLine("      baseURL: ${yamlQuote(routeBaseUrl.orEmpty())}")
                 appendLine("      models:")
                 appendLine("        - id: ${yamlQuote(provider.model.ifBlank { route.defaultModel })}")
             }

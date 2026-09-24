@@ -7,7 +7,6 @@ import com.jarves.mh.BuildConfig
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -353,13 +352,17 @@ class RuntimeInstaller(private val context: Context) {
             installed[com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS]?.let { current ->
                 runCatching {
                     JSONObject(fetchText("https://registry.npmjs.org/@deepseek-ai/dsh/latest")).getString("version")
-                }.getOrNull()?.takeIf { isVersionNewer(it, current) }?.let { latest ->
-                    put(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS, AgentUpdateInfo(current, latest))
-                }
+                }.getOrNull()
+                    // Only releases this app build has pinned digests for are ever
+                    // offered (ISSUE-002/008 — the registry is data, not trust).
+                    ?.takeIf { isVersionNewer(it, current) && VerifiedAgentReleases.isVerifiedDshRelease(it) }
+                    ?.let { latest ->
+                        put(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS, AgentUpdateInfo(current, latest))
+                    }
             }
             installed[com.jarves.mh.model.AgentKind.ANTIGRAVITY]?.let { current ->
                 runCatching { fetchAgyManifest().getString("version") }.getOrNull()
-                    ?.takeIf { isVersionNewer(it, current) }?.let { latest ->
+                    ?.takeIf { isVersionNewer(it, current) && VerifiedAgentReleases.isVerifiedAgyRelease(it) }?.let { latest ->
                         put(com.jarves.mh.model.AgentKind.ANTIGRAVITY, AgentUpdateInfo(current, latest))
                     }
             }
@@ -414,8 +417,13 @@ class RuntimeInstaller(private val context: Context) {
         val manifest = fetchAgyManifest()
         val latest = manifest.getString("version")
         check(latest == expectedVersion) { "A newer Antigravity release appeared. Check again before updating." }
+        // ISSUE-002: the manifest's own url/sha512 are attacker-controllable when
+        // the endpoint is compromised. Only the digest pinned in this app build
+        // is trusted; an unknown version fails closed.
+        val pinnedSha512 = VerifiedAgentReleases.agyDigest(latest)
+            ?: error("Antigravity $latest has not been verified for this Mobile Harness release yet. Update the app to receive it.")
         val downloaded = File(downloads, "antigravity-$latest-linux-arm64.tar.gz")
-        downloadVerified(manifest.getString("url"), downloaded, manifest.getString("sha512"), algorithm = "SHA-512") { bytes, total ->
+        downloadVerified(manifest.getString("url"), downloaded, pinnedSha512, algorithm = "SHA-512") { bytes, total ->
             val ratio = if (total > 0L) bytes.toFloat() / total else 0f
             onProgress(RuntimeInstallProgress("Downloading Antigravity CLI $latest", ratio * 0.9f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
         }
@@ -450,21 +458,42 @@ class RuntimeInstaller(private val context: Context) {
         check(latest == expectedVersion) { "A newer DeepSeek Harness release appeared. Check again before updating." }
         val quotedVersion = latest.replace(Regex("[^0-9A-Za-z.+-]"), "")
         check(quotedVersion == latest) { "Invalid DeepSeek Harness version" }
-        runGuestCommand(
-            proot = runtime.proot,
-            command = "set -e; next=/usr/local/lib/dsh.updating; old=/usr/local/lib/dsh.previous; " +
-                "rm -rf \"${'$'}next\" \"${'$'}old\"; mkdir -p \"${'$'}next\"; " +
-                "cd \"${'$'}next\"; npm init -y >/dev/null; " +
-                "npm install --omit=dev --no-audit --no-fund @deepseek-ai/dsh@$quotedVersion; " +
-                "mv /usr/local/lib/dsh \"${'$'}old\"; " +
-                "if mv \"${'$'}next\" /usr/local/lib/dsh; then rm -rf \"${'$'}old\"; " +
-                "else mv \"${'$'}old\" /usr/local/lib/dsh; exit 1; fi",
-            displayCommand = "npm install @deepseek-ai/dsh@$quotedVersion",
-            fraction = 0.55f,
-            timeoutMs = 20 * 60 * 1_000L,
-            onProgress = onProgress,
-            failureMessage = "DeepSeek Harness update failed; the installed version was preserved",
-        )
+        // ISSUE-008: an open-ended `npm install` resolves whatever the registry
+        // serves at that moment. The tarball is downloaded and digest-verified
+        // against this build's pinned release first (the same rule as the agy
+        // updater, ISSUE-002), and npm then installs from the verified file.
+        val pinnedSha512 = VerifiedAgentReleases.dshDigest(latest)
+            ?: error("DeepSeek Harness $latest has not been verified for this Mobile Harness release yet. Update the app to receive it.")
+        val tarball = File(downloads, "dsh-$quotedVersion.tgz")
+        downloadVerified("https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-$quotedVersion.tgz", tarball, pinnedSha512, algorithm = "SHA-512") { bytes, total ->
+            val ratio = if (total > 0L) bytes.toFloat() / total else 0f
+            onProgress(RuntimeInstallProgress("Downloading DeepSeek Harness $latest", ratio * 0.4f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
+        }
+        // The runtime-bridge directory is bind-mounted into the guest at
+        // /pocket-bridge, so the verified tarball is visible to npm without
+        // copying it into the rootfs.
+        val bridgeDir = File(context.filesDir, "runtime-bridge").apply { mkdirs() }
+        val guestTarball = File(bridgeDir, "dsh-$quotedVersion.tgz")
+        tarball.copyTo(guestTarball, overwrite = true)
+        try {
+            runGuestCommand(
+                proot = runtime.proot,
+                command = "set -e; next=/usr/local/lib/dsh.updating; old=/usr/local/lib/dsh.previous; " +
+                    "rm -rf \"${'$'}next\" \"${'$'}old\"; mkdir -p \"${'$'}next\"; " +
+                    "cd \"${'$'}next\"; npm init -y >/dev/null; " +
+                    "npm install --omit=dev --no-audit --no-fund /pocket-bridge/dsh-$quotedVersion.tgz; " +
+                    "mv /usr/local/lib/dsh \"${'$'}old\"; " +
+                    "if mv \"${'$'}next\" /usr/local/lib/dsh; then rm -rf \"${'$'}old\"; " +
+                    "else mv \"${'$'}old\" /usr/local/lib/dsh; exit 1; fi",
+                displayCommand = "npm install dsh-$quotedVersion (verified tarball)",
+                fraction = 0.55f,
+                timeoutMs = 20 * 60 * 1_000L,
+                onProgress = onProgress,
+                failureMessage = "DeepSeek Harness update failed; the installed version was preserved",
+            )
+        } finally {
+            guestTarball.delete()
+        }
         dshMarker.writeText(latest)
         dshAndroidCompatibilityMarker.delete()
         ensureDshAndroidCompatibility()
@@ -983,6 +1012,9 @@ class RuntimeInstaller(private val context: Context) {
             onProgress(RuntimeInstallProgress(message, from + ratio * (to - from), downloaded, total.takeIf { it > 0 }))
         }
         onProgress(RuntimeInstallProgress("Installing ${archiveName.removeSuffix(".zip")}", to, indeterminate = true))
+        // Space guard (ISSUE-023): an extraction needs the archive plus the
+        // extracted tree next to it — the audit's ~3x heuristic.
+        ensureFreeBytes(destination.parentFile ?: context.cacheDir, 3L * archive.length(), "extraction")
         val staging = File(destination.parentFile, "${destination.name}.installing")
         staging.deleteRecursively()
         staging.mkdirs()
@@ -1192,15 +1224,20 @@ class RuntimeInstaller(private val context: Context) {
             ),
         )
         writeResolver()
+        // ISSUE-008 slice: keep the maintenance run minimal and predictable —
+        // no new recommends, and the apt cache is dropped afterwards so disk
+        // state stays comparable between devices. The full pinned-patch policy
+        // (and the Ubuntu 24.04 base) lands with the rootfs rebuild (roadmap 3i).
         val command = "export DEBIAN_FRONTEND=noninteractive; " +
             "dpkg --configure -a && " +
-            "apt-get -o DPkg::Lock::Timeout=120 -f install -y && " +
+            "apt-get -o DPkg::Lock::Timeout=120 -f install -y --no-install-recommends && " +
             "apt-get -o DPkg::Lock::Timeout=120 update && " +
-            "apt-get -o DPkg::Lock::Timeout=120 upgrade -y"
+            "apt-get -o DPkg::Lock::Timeout=120 upgrade -y --no-install-recommends && " +
+            "apt-get clean && rm -rf /var/lib/apt/lists/*"
         runGuestCommand(
             proot = proot,
             command = command,
-            displayCommand = "dpkg --configure -a && apt-get -f install -y && apt-get update && apt-get upgrade -y",
+            displayCommand = "dpkg --configure -a && apt-get -f install -y && apt-get update && apt-get upgrade -y --no-install-recommends",
             fraction = 0.69f,
             timeoutMs = 35 * 60 * 1_000L,
             onProgress = onProgress,
@@ -1285,45 +1322,38 @@ class RuntimeInstaller(private val context: Context) {
         val collected = StringBuilder()
         try {
             withTimeout(timeoutMs) {
-                var offset = 0L
                 var pending = ""
-                while (running.isAlive || (native?.outputFile?.length() ?: 0L) > offset) {
-                    coroutineContext.ensureActive()
-                    val file = native?.outputFile
-                    if (file != null && file.length() > offset) {
-                        RandomAccessFile(file, "r").use { input ->
-                            input.seek(offset)
-                            val available = (input.length() - offset).coerceAtMost(256 * 1024).toInt()
-                            val bytes = ByteArray(available)
-                            input.readFully(bytes)
-                            offset += available
-                            pending += bytes.toString(Charsets.UTF_8).replace('\r', '\n')
+                val consumeChunk: suspend (String) -> Unit = { chunk ->
+                    pending += chunk.replace('\r', '\n')
+                    val parts = pending.split('\n')
+                    pending = parts.last()
+                    for (raw in parts.dropLast(1)) {
+                        val line = sanitizeTerminalLine(raw)
+                        if (line.isNotBlank()) {
+                            collected.appendLine(line)
+                            if (collected.length > MAX_COLLECTED_OUTPUT) collected.delete(0, collected.length - MAX_COLLECTED_OUTPUT)
+                            onProgress(
+                                RuntimeInstallProgress(
+                                    message = line,
+                                    fraction = fraction,
+                                    terminalLine = line,
+                                    indeterminate = true,
+                                    event = RuntimeInstallEvent.OUTPUT,
+                                ),
+                            )
                         }
-                        val parts = pending.split('\n')
-                        pending = parts.last()
-                        for (raw in parts.dropLast(1)) {
-                            val line = sanitizeTerminalLine(raw)
-                            if (line.isNotBlank()) {
-                                collected.appendLine(line)
-                                if (collected.length > MAX_COLLECTED_OUTPUT) collected.delete(0, collected.length - MAX_COLLECTED_OUTPUT)
-                                onProgress(
-                                    RuntimeInstallProgress(
-                                        message = line,
-                                        fraction = fraction,
-                                        terminalLine = line,
-                                        indeterminate = true,
-                                        event = RuntimeInstallEvent.OUTPUT,
-                                    ),
-                                )
-                            }
-                        }
-                    } else {
-                        delay(80)
                     }
                 }
-                sanitizeTerminalLine(pending).takeIf(String::isNotBlank)?.let { line ->
-                    collected.appendLine(line)
-                    onProgress(RuntimeInstallProgress(line, fraction, terminalLine = line, indeterminate = true, event = RuntimeInstallEvent.OUTPUT))
+                val file = native?.outputFile
+                if (file != null) {
+                    // The single shared tail loop (ISSUE-013).
+                    OutputFileTailer.tailChunks(file, running::isAlive, consumeChunk)
+                    sanitizeTerminalLine(pending).takeIf(String::isNotBlank)?.let { line ->
+                        collected.appendLine(line)
+                        onProgress(RuntimeInstallProgress(line, fraction, terminalLine = line, indeterminate = true, event = RuntimeInstallEvent.OUTPUT))
+                    }
+                } else {
+                    while (running.isAlive) delay(80)
                 }
             }
         } finally {
@@ -1740,6 +1770,12 @@ class RuntimeInstaller(private val context: Context) {
             existing = 0L
         }
         val total = connection.contentLengthLong.takeIf { it >= 0L }?.plus(existing) ?: -1L
+        // Space guard (ISSUE-023): fail BEFORE writing when the download cannot
+        // possibly fit — roughly the file itself plus extraction headroom
+        // (capped, so small downloads never demand a huge floor).
+        if (total > 0L) {
+            ensureFreeBytes(destination.parentFile ?: context.cacheDir, total + minOf(total, 256L * 1024 * 1024), "download")
+        }
         connection.inputStream.use { input ->
             FileOutputStream(temporary, resumed).use { output ->
                 val buffer = ByteArray(128 * 1024)
@@ -1761,6 +1797,17 @@ class RuntimeInstaller(private val context: Context) {
         }
         destination.delete()
         check(temporary.renameTo(destination)) { "Could not finish download" }
+    }
+
+    /** Fails with a friendly message when [directory] has less than [requiredBytes] free (ISSUE-023). */
+    private fun ensureFreeBytes(directory: File, requiredBytes: Long, label: String) {
+        if (requiredBytes <= 0L) return
+        val available = runCatching { android.os.StatFs(directory.absolutePath).availableBytes }
+            .getOrNull() ?: return
+        check(available >= requiredBytes) {
+            val mb = 1_048_576L
+            "Not enough free storage for the $label: about ${requiredBytes / mb} MB is needed but only ${available / mb} MB is free. Free up space and try again."
+        }
     }
 
     private fun fetchText(url: String): String {
@@ -1792,7 +1839,7 @@ class RuntimeInstaller(private val context: Context) {
         const val GITHUB_CLI_GUEST_PATH = "/root/.local/bin/gh"
         private const val AGY_VERSION = "1.1.27"
         private const val AGY_RELEASE_URL = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.27-5211191891591168/linux-arm/cli_linux_arm64.tar.gz"
-        private const val AGY_RELEASE_SHA512 = "ed45f6930785aa4b42f14e07ace1c9d91a94fb76e760f54acbd7d3d3951e1f957fd456a0dae2a3124dd9a3b689bf7afb7c9303a3e4ba95037fc10063424d9bf9"
+        private val AGY_RELEASE_SHA512: String get() = VerifiedAgentReleases.agyDigest(AGY_VERSION).orEmpty()
         private const val GITHUB_CLI_VERSION = "2.100.0"
         private const val GITHUB_CLI_RELEASE_URL = "https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_linux_arm64.tar.gz"
         private const val GITHUB_CLI_RELEASE_SHA256 = "ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961"
@@ -1806,9 +1853,13 @@ class RuntimeInstaller(private val context: Context) {
         private const val LANGUAGE_TOOLS_VERSION = "node-v24.19.0-python3-v1"
         private const val CORE_TOOLS_VERSION = "core-bundle-2026.09.5"
         private const val LEGACY_CORE_TOOLS_VERSION = "core-bundle-2026.09.4"
-        private const val SYSTEM_UPGRADE_VERSION = "ubuntu-maintenance-v1"
+        private const val SYSTEM_UPGRADE_VERSION = "ubuntu-maintenance-v2"
         private const val ANDROID_TOOLS_VERSION = "sdk36-build-tools35-gradle8.14.3-maven-2026.09"
-        private const val ANDROID_ASSET_BASE = "https://appdevforall.org/dev-assets/debug"
+        // Toolchain assets (ISSUE-003): served from the project's own release
+        // channel (same channel as the runtime bundles) instead of a personal
+        // third-party domain. SHA-256 pins below are unchanged and remain the
+        // integrity anchor; provenance notes live in THIRD_PARTY_NOTICES.md.
+        private const val ANDROID_ASSET_BASE = "https://github.com/techjarves/Mobile-Harness/releases/download/android-tools-2026.09.1"
         private const val ANDROID_SDK_URL = "$ANDROID_ASSET_BASE/android-sdk-arm64-v8a.zip"
         private const val ANDROID_SDK_SHA256 = "bfe5bc940a7ede14735817a40962256666ce4152b9f3135f34a4ab9bccb87c3f"
         private const val ANDROID_GRADLE_URL = "$ANDROID_ASSET_BASE/gradle-8.14.3-bin.zip"
