@@ -16,6 +16,7 @@ import com.jarves.mh.data.ApiKeyVault
 import com.jarves.mh.data.ApiKeyInfo
 import com.jarves.mh.data.AppPreferences
 import com.jarves.mh.model.ActivityItem
+import com.jarves.mh.model.AgentAutonomyMode
 import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ChatMessage
@@ -215,6 +216,7 @@ data class AppUiState(
     val devStackBytesPerSecond: Long? = null,
     val agentKind: AgentKind = AgentKind.CLAUDE_CODE,
     val primaryAgentKind: AgentKind = AgentKind.CLAUDE_CODE,
+    val autonomyMode: AgentAutonomyMode = AgentAutonomyMode.APPROVE_RISKY,
     val installedAgentVersions: Map<AgentKind, String> = emptyMap(),
     val agentInstalling: AgentKind? = null,
     val agentMessage: String? = null,
@@ -247,8 +249,16 @@ data class AppUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val vault = ApiKeyVault(application)
     private val preferences = AppPreferences(application)
-    private val claudeRuntime = ClaudeRuntimeBridge(application) { profile -> vault.get(profile.kind.name) }
-    private val dshRuntime = DshRuntimeBridge(application) { profile -> vault.get(profile.kind.name) }
+    private val claudeRuntime = ClaudeRuntimeBridge(
+        application,
+        secretFor = { profile -> vault.get(profile.kind.name) },
+        autonomyProvider = { preferences.agentAutonomyMode },
+    )
+    private val dshRuntime = DshRuntimeBridge(
+        application,
+        secretFor = { profile -> vault.get(profile.kind.name) },
+        autonomyProvider = { preferences.agentAutonomyMode },
+    )
     private val installer = RuntimeInstaller(application)
     private val antigravityRuntime = AntigravityRuntimeBridge(
         application,
@@ -260,6 +270,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         saveConversationId = { projectId, id ->
             _state.value.activeChatId?.let { preferences.saveAgentConversation(AgentKind.ANTIGRAVITY, projectId, it, id) }
         },
+        autonomyProvider = { preferences.agentAutonomyMode },
     )
     private val agentRegistry = AgentRegistry.builtIns(claudeRuntime, dshRuntime, antigravityRuntime)
     private fun activeRuntime(): com.jarves.mh.runtime.RuntimeBridge = agentRegistry.require(_state.value.agentKind).runtime
@@ -299,6 +310,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             backgroundSetupComplete = preferences.backgroundSetupComplete,
             agentKind = initialAgentKind,
             primaryAgentKind = initialPrimaryAgentKind,
+            autonomyMode = preferences.agentAutonomyMode,
             provider = preferences.loadProvider(vault, initialAgentKind),
             activeApiKeyName = vault.list(preferences.loadProvider(vault, initialAgentKind).kind.name)
                 .firstOrNull(ApiKeyInfo::isActive)?.name,
@@ -1151,7 +1163,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val result = runCatching {
             withContext(Dispatchers.IO) {
-                installer.initializeExisting { progress ->
+                installer.initializeExisting(preferences.agentAutonomyMode) { progress ->
                     _state.update { current ->
                         current.copy(
                             startupProgress = 0.05f + progress.fraction * 0.95f,
@@ -3087,6 +3099,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun answerApproval(approved: Boolean) {
         val request = state.value.pendingApproval ?: return
         viewModelScope.launch { activeRuntime().respondToApproval(request, approved) }
+    }
+
+    /**
+     * Switches the agent autonomy mode (ISSUE-001). Applies from the next
+     * session on: running sessions keep the mode they were launched with.
+     */
+    fun setAutonomyMode(mode: AgentAutonomyMode) {
+        preferences.agentAutonomyMode = mode
+        _state.update { it.copy(autonomyMode = mode) }
     }
 
     fun stopTask() {

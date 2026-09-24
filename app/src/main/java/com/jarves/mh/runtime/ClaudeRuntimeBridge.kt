@@ -1,9 +1,7 @@
 package com.jarves.mh.runtime
 
 import android.content.Context
-import android.util.Log
 import androidx.core.content.ContextCompat
-import com.jarves.mh.BuildConfig
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.DiffLine
@@ -11,7 +9,6 @@ import com.jarves.mh.model.DiffLineType
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProjectKind
 import com.jarves.mh.model.ProviderProfile
-import com.jarves.mh.model.RiskLevel
 import com.jarves.mh.model.RuntimeEvent
 import com.jarves.mh.model.ToolRequest
 import java.io.File
@@ -67,6 +64,8 @@ internal object ProviderRuntimeErrorDetector {
 class ClaudeRuntimeBridge(
     private val context: Context,
     private val secretFor: (ProviderProfile) -> String?,
+    /** Current autonomy mode; read live so a settings change applies to the next session. */
+    private val autonomyProvider: () -> AgentAutonomyMode = { AgentAutonomyMode.APPROVE_RISKY },
 ) : RuntimeBridge {
     private val installer = RuntimeInstaller(context)
     private val eventBus = MutableSharedFlow<RuntimeEvent>(extraBufferCapacity = 64)
@@ -93,6 +92,8 @@ class ClaudeRuntimeBridge(
     override suspend fun startSession(projectId: String, projectSlug: String, projectKind: ProjectKind, prompt: String, conversationHistory: List<ChatMessage>, provider: ProviderProfile): String = withContext(Dispatchers.IO + NonCancellable) {
         val sessionId = UUID.randomUUID().toString()
         finishedSessions.remove(sessionId)
+        // Stale approvals from an earlier session can never answer this one.
+        pending.clear()
         activeSessionId = sessionId
         userStopRequested = false
         activeProjectSlug = projectSlug
@@ -137,7 +138,7 @@ class ClaudeRuntimeBridge(
             // Sending a prompt must never perform network update checks or put setup
             // messages into the conversation.
             val installed = installer.installedRuntime()
-            installer.ensureSettingsAndHooks()
+            installer.ensureSettingsAndHooks(autonomyProvider())
             val workspace = ensureWorkspace(projectId)
             createCheckpoint(projectId, workspace)
             val before = snapshot(workspace)
@@ -148,10 +149,8 @@ class ClaudeRuntimeBridge(
             val launch = RuntimeLaunchConfigBuilder.build(provider, authToken = secret, localGatewayUrl = formatGateway?.url)
             // Raw provider config, prompt-bearing command lines and agent output must
             // never reach logcat in release builds (ISSUE-004).
-            if (BuildConfig.DEBUG) {
-                Log.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
-                Log.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
-            }
+            AppLog.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
+            AppLog.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
 
             // Build a context-aware prompt that includes conversation history
             val guestWorkspacePath = "/workspace/$projectSlug"
@@ -171,7 +170,7 @@ class ClaudeRuntimeBridge(
                 add("--max-turns")
                 add("25")
             }
-            if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Launching command: $command")
+            AppLog.d("ClaudeBridge", "Launching command: $command")
             val process = installer.process(
                 installed.proot,
                 installed.rootfs,
@@ -208,7 +207,7 @@ class ClaudeRuntimeBridge(
                             val line = pendingOutput.substring(0, newline).trimEnd('\r')
                             pendingOutput.delete(0, newline + 1)
                             if (line.isNotBlank()) {
-                                if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "OUTPUT: $line")
+                                AppLog.d("ClaudeBridge", "OUTPUT: $line")
                                 ProviderRuntimeErrorDetector.detect(line)?.let { reason ->
                                     process.destroyForcibly()
                                     throw ProviderSessionException(reason)
@@ -225,11 +224,11 @@ class ClaudeRuntimeBridge(
                     }
                 }
                 pendingOutput.toString().trim().takeIf(String::isNotBlank)?.let { line ->
-                    if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "TRAILING OUTPUT: $line")
+                    AppLog.d("ClaudeBridge", "TRAILING OUTPUT: $line")
                     if (!consumeClaudeEvent(sessionId, line)) lastDiagnostic = line.takeLast(500)
                 }
                 val exit = process.waitFor()
-                if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Process exited with code $exit")
+                AppLog.d("ClaudeBridge", "Process exited with code $exit")
                 permissionWatcher.cancelAndJoin()
                 pending.values.filter { it.request.sessionId == sessionId }.forEach { permission ->
                     permission.response.writeText("deny")
@@ -237,7 +236,7 @@ class ClaudeRuntimeBridge(
                 }
                 val changed = changedFiles(workspace, before)
                 if (changed.isNotEmpty()) {
-                    if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Changed files: $changed")
+                    AppLog.d("ClaudeBridge", "Changed files: $changed")
                     saveChangedPaths(projectId, changed)
                     val details = loadPendingChanges(projectId)
                     eventBus.emit(RuntimeEvent.FilesChanged(sessionId, details))
@@ -257,7 +256,7 @@ class ClaudeRuntimeBridge(
                 }
             }
         }.onFailure { error ->
-            Log.e("ClaudeBridge", "Session failed", error)
+            AppLog.e("ClaudeBridge", "Session failed", error)
             val message = friendlyError(error)
             emitFailureOnce(sessionId, message)
             if (userStopRequested) {
@@ -369,32 +368,102 @@ class ClaudeRuntimeBridge(
         true
     }
 
-    private suspend fun watchPermissionRequests(sessionId: String) {
+    /**
+     * Watches the runtime-bridge directory the guest hook writes to and turns
+     * each `.request` file into a policy decision (ISSUE-001).
+     *
+     * Every request is handled in its own child coroutine so one slow approval
+     * never blocks the others. The policy itself lives in [AgentPermissions];
+     * this layer only wires files, events and timeouts together. All failure
+     * paths fail CLOSED: an unreadable request, a parse failure, or a timeout
+     * writes "deny" — never "allow".
+     */
+    private fun CoroutineScope.watchPermissionRequests(sessionId: String) {
         val bridge = File(context.filesDir, "runtime-bridge")
-        while (kotlin.coroutines.coroutineContext.isActive) {
+        val inFlight = ConcurrentHashMap.newKeySet<String>()
+        while (coroutineContext.isActive) {
             bridge.listFiles { file -> file.name.endsWith(".request") }.orEmpty().forEach { file ->
                 val approvalId = file.name.removeSuffix(".request")
-                runCatching {
-                    val json = JSONObject(file.readText())
-                    val toolName = json.optString("tool_name", "Tool")
-                    val input = json.optJSONObject("tool_input") ?: JSONObject()
-                    val command = input.optString("command").ifBlank { null }
-                    val paths = listOf("file_path", "path", "notebook_path")
-                        .mapNotNull { key -> input.optString(key).takeIf(String::isNotBlank) }
-                    val explanation = input.optString("description")
-                        .ifBlank { command.orEmpty() }
-                        .ifBlank { "$toolName running in project" }
-
-                    if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Auto-approving permission request $approvalId for $toolName ($paths)")
-                    val response = File(file.parentFile, "$approvalId.response")
-                    response.writeText("allow")
-
-                    eventBus.emit(RuntimeEvent.ToolCompleted(sessionId, toolName, explanation))
-                }.onFailure {
-                    File(file.parentFile, "$approvalId.response").writeText("allow")
+                if (inFlight.add(approvalId)) {
+                    launch { runCatching { handlePermissionRequest(sessionId, file) } }
                 }
             }
             delay(50)
+        }
+    }
+
+    private suspend fun handlePermissionRequest(sessionId: String, requestFile: File) {
+        val approvalId = requestFile.name.removeSuffix(".request")
+        val responseFile = File(requestFile.parentFile, "$approvalId.response")
+        val raw = runCatching { requestFile.readText() }.getOrNull()
+        // The hook only needs the response; drop the request so a poll loop can
+        // never replay it.
+        runCatching { requestFile.delete() }
+        if (raw == null) {
+            // FAIL-CLOSED: an unreadable request is denied, never allowed.
+            runCatching { responseFile.writeText("deny") }
+            eventBus.emit(
+                RuntimeEvent.RuntimeLog(
+                    sessionId,
+                    "Permission request blocked",
+                    "A tool request from the agent could not be read and was blocked.",
+                ),
+            )
+            return
+        }
+        decidePermission(sessionId, approvalId, raw, responseFile)
+    }
+
+    private suspend fun decidePermission(
+        sessionId: String,
+        approvalId: String,
+        raw: String,
+        responseFile: File,
+    ) {
+        val mode = autonomyProvider()
+        val parsed = AgentPermissions.parsePermissionRequest(raw)
+        if (parsed == null) {
+            // FAIL-CLOSED (ISSUE-001): a corrupt or unparseable request is denied.
+            runCatching { responseFile.writeText("deny") }
+            eventBus.emit(
+                RuntimeEvent.RuntimeLog(
+                    sessionId,
+                    "Permission request blocked",
+                    "A tool request from the agent was malformed and was blocked.",
+                ),
+            )
+            return
+        }
+        val risk = AgentPermissions.classifyRisk(parsed.toolName, parsed.command)
+        val request = ToolRequest(
+            approvalId = approvalId,
+            sessionId = sessionId,
+            toolName = parsed.toolName,
+            explanation = parsed.explanation,
+            affectedPaths = parsed.paths,
+            commandPreview = parsed.command,
+            risk = risk,
+        )
+        if (AgentPermissions.shouldAutoApprove(mode, risk)) {
+            runCatching { responseFile.writeText("allow") }
+            eventBus.emit(RuntimeEvent.ToolCompleted(sessionId, parsed.toolName, request.explanation))
+            return
+        }
+        // Interactive: surface the request to the user and wait, with a
+        // fail-closed timeout. respondToApproval answers by removing the entry.
+        pending[approvalId] = PendingPermission(request, responseFile)
+        eventBus.emit(RuntimeEvent.ToolRequested(sessionId, request))
+        val deadline = android.os.SystemClock.elapsedRealtime() + APPROVAL_TIMEOUT_MS
+        while (android.os.SystemClock.elapsedRealtime() < deadline &&
+            kotlin.coroutines.coroutineContext.isActive &&
+            pending.containsKey(approvalId)
+        ) {
+            delay(APPROVAL_POLL_MS)
+        }
+        if (pending.remove(approvalId) != null) {
+            // Timed out with no user decision: deny and tell the UI.
+            runCatching { responseFile.writeText("deny") }
+            eventBus.emit(RuntimeEvent.ToolRejected(sessionId, approvalId))
         }
     }
 
@@ -896,15 +965,6 @@ class ClaudeRuntimeBridge(
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun classifyRisk(tool: String, command: String?): RiskLevel {
-        val preview = "${tool.lowercase()} ${command.orEmpty().lowercase()}"
-        return when {
-            listOf("rm -rf", "git push", "git reset", "sudo", "curl ").any(preview::contains) -> RiskLevel.HIGH
-            tool in listOf("Write", "Edit", "NotebookEdit", "Bash") -> RiskLevel.REVIEW
-            else -> RiskLevel.SAFE
-        }
-    }
-
     private fun friendlyError(error: Throwable): String {
         val message = error.message.orEmpty()
         return when {
@@ -989,7 +1049,7 @@ class ClaudeRuntimeBridge(
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, detail),
             )
         }.onFailure { error ->
-            Log.w("ClaudeBridge", "Could not post task result notification", error)
+            AppLog.w("ClaudeBridge", "Could not post task result notification", error)
             context.stopService(android.content.Intent(context, RuntimeExecutionService::class.java))
         }
     }
@@ -1015,5 +1075,9 @@ class ClaudeRuntimeBridge(
         private const val MAX_RENDERED_DIFF_LINES = 600
         private const val DIFF_CONTEXT_LINES = 3
         private const val FOREGROUND_PROGRESS_MIN_INTERVAL_MS = 750L
+
+        /** Interactive approvals auto-deny after this long with no user answer (ISSUE-001). */
+        private const val APPROVAL_TIMEOUT_MS = 60_000L
+        private const val APPROVAL_POLL_MS = 250L
     }
 }

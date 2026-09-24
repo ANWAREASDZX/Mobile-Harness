@@ -97,9 +97,38 @@ class WorkspaceCheckpoints(private val filesDir: File) {
     fun buildChangeDetails(projectId: String, workspace: File, paths: List<String>): List<ChangeItem> {
         val backup = File(checkpointDir(projectId), "project")
         return paths.map { path ->
-            val before = safeWorkspaceFile(backup, path).takeIf(File::isFile)?.readBytes() ?: ByteArray(0)
-            val after = safeWorkspaceFile(workspace, path).takeIf(File::isFile)?.readBytes() ?: ByteArray(0)
-            val binary = before.any { it == 0.toByte() } || after.any { it == 0.toByte() }
+            val beforeFile = safeWorkspaceFile(backup, path).takeIf(File::isFile)
+            val afterFile = safeWorkspaceFile(workspace, path).takeIf(File::isFile)
+            // Binary/size guard (ISSUE-034): a cheap 8 KB sample decides before
+            // any full read, so a huge or binary file can never blow up the
+            // heap during a diff. Above the size cap only an info card remains.
+            val beforeSample = beforeFile?.readPrefix(BINARY_SAMPLE_BYTES) ?: ByteArray(0)
+            val afterSample = afterFile?.readPrefix(BINARY_SAMPLE_BYTES) ?: ByteArray(0)
+            val binary = beforeSample.contains(0.toByte()) || afterSample.contains(0.toByte())
+            val beforeSize = beforeFile?.length() ?: 0L
+            val afterSize = afterFile?.length() ?: 0L
+            val oversized = beforeSize > MAX_DIFF_FILE_BYTES || afterSize > MAX_DIFF_FILE_BYTES
+            if (binary || oversized) {
+                return@map ChangeItem(
+                    path = path,
+                    additions = 0,
+                    deletions = 0,
+                    diffLines = listOf(
+                        DiffLine(
+                            DiffLineType.INFO,
+                            if (binary) {
+                                "Binary file changed"
+                            } else {
+                                val largest = maxOf(beforeSize, afterSize)
+                                "File is too large to diff (${largest / (1024 * 1024)} MB). Undo and Keep still work."
+                            },
+                        ),
+                    ),
+                    binary = binary,
+                )
+            }
+            val before = beforeFile?.readBytes() ?: ByteArray(0)
+            val after = afterFile?.readBytes() ?: ByteArray(0)
             val (additions, deletions) = lineChanges(before, after)
             ChangeItem(
                 path = path,
@@ -109,6 +138,18 @@ class WorkspaceCheckpoints(private val filesDir: File) {
                 binary = binary,
             )
         }
+    }
+
+    /** Reads at most [maxBytes] from the head of the file; never loads more. */
+    private fun File.readPrefix(maxBytes: Int): ByteArray = inputStream().use { input ->
+        val buffer = ByteArray(maxBytes)
+        var offset = 0
+        while (offset < maxBytes) {
+            val read = input.read(buffer, offset, maxBytes - offset)
+            if (read < 0) break
+            offset += read
+        }
+        buffer.copyOf(offset)
     }
 
     fun buildDiffLines(beforeBytes: ByteArray, afterBytes: ByteArray): List<DiffLine> {
@@ -254,5 +295,11 @@ class WorkspaceCheckpoints(private val filesDir: File) {
         private const val MAX_DIFF_LINES = 2_000
         private const val MAX_RENDERED_DIFF_LINES = 600
         private const val DIFF_CONTEXT_LINES = 3
+
+        /** Head sample size for the cheap binary check (ISSUE-034). */
+        private const val BINARY_SAMPLE_BYTES = 8 * 1024
+
+        /** Files above this size never get fully read for a diff (ISSUE-034). */
+        private const val MAX_DIFF_FILE_BYTES = 5L * 1024 * 1024
     }
 }

@@ -1397,7 +1397,7 @@ class RuntimeInstaller(private val context: Context) {
                 File(rootfs, "usr/bin/bash").canExecute() &&
                 File(rootfs, "lib/ld-linux-aarch64.so.1").exists()
         }.onFailure {
-            android.util.Log.e("RuntimeInstaller", "Could not repair Linux compatibility links", it)
+            AppLog.e("RuntimeInstaller", "Could not repair Linux compatibility links", it)
         }.getOrDefault(false)
     }
 
@@ -1424,15 +1424,18 @@ class RuntimeInstaller(private val context: Context) {
         val buffer = java.nio.ByteBuffer.wrap(bytes)
         decoder.decode(buffer).toString()
     }.getOrElse { error ->
-        android.util.Log.w("RuntimeInstaller", "Could not decode process output as UTF-8: ${error.message}")
+        AppLog.w("RuntimeInstaller", "Could not decode process output as UTF-8: ${error.message}")
         ""
     }
 
-    suspend fun initializeExisting(onProgress: suspend (RuntimeInstallProgress) -> Unit): InstalledRuntime {
+    suspend fun initializeExisting(
+        mode: AgentAutonomyMode,
+        onProgress: suspend (RuntimeInstallProgress) -> Unit,
+    ): InstalledRuntime {
         val installed = installedRuntime()
         onProgress(RuntimeInstallProgress("Checking private runtime files", 0.15f))
         writeResolver()
-        ensureSettingsAndHooks()
+        ensureSettingsAndHooks(mode)
         File(context.filesDir, "runtime-bridge").apply { mkdirs(); listFiles()?.forEach { it.delete() } }
         onProgress(RuntimeInstallProgress("Preparing the Android runtime bridge", 0.42f))
         check(File(rootfs, "usr/local/bin/node").canExecute()) { "Core runtime is missing Node.js" }
@@ -1530,42 +1533,16 @@ class RuntimeInstaller(private val context: Context) {
         )
     }
 
-    fun ensureSettingsAndHooks() {
+    fun ensureSettingsAndHooks(mode: AgentAutonomyMode = AgentAutonomyMode.APPROVE_RISKY) {
         val hook = File(rootfs, "opt/pocket/permission-hook.sh")
         hook.parentFile?.mkdirs()
-        hook.writeText(
-            """#!/bin/sh
-cat > /dev/null
-printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
-""",
-        )
+        // Policy generation (ISSUE-001) lives in AgentPermissions so it is unit-tested.
+        // Only the explicit FULLY_AUTONOMOUS mode installs an always-allow hook;
+        // every other mode installs the fail-closed interactive bridge.
+        hook.writeText(AgentPermissions.permissionHookScript(mode))
         Os.chmod(hook.absolutePath, 0b111101101)
 
-        val settingsContent = JSONObject()
-            .put("disableAllHooks", false)
-            .put(
-                "permissions",
-                JSONObject()
-                    .put("allow", claudeWorkspaceToolRules())
-                    .put("defaultMode", "acceptEdits"),
-            )
-            .put(
-                "hooks",
-                JSONObject().put(
-                    "PermissionRequest",
-                    org.json.JSONArray().put(
-                        JSONObject()
-                            .put("matcher", "Bash|Edit|Write|NotebookEdit")
-                            .put(
-                                "hooks",
-                                org.json.JSONArray().put(
-                                    JSONObject().put("type", "command").put("command", "/opt/pocket/permission-hook.sh"),
-                                ),
-                            ),
-                    ),
-                ),
-            )
-            .toString()
+        val settingsContent = AgentPermissions.claudeSettingsJson(mode)
 
         val settingsPaths = listOf(
             File(rootfs, "root/.claude/pocket-settings.json"),
@@ -1592,16 +1569,6 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
         projects.put(workspacePath, workspace)
         state.put("projects", projects)
         stateFile.writeText(state.toString())
-    }
-
-    private fun claudeWorkspaceToolRules() = org.json.JSONArray().apply {
-        put("Bash")
-        put("Edit")
-        put("Write")
-        put("NotebookEdit")
-        put("Read")
-        put("Glob")
-        put("Grep")
     }
 
     private fun writeResolver() {

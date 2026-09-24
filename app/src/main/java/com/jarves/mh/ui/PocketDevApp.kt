@@ -2139,6 +2139,7 @@ private fun RootScreenHost(
                     onRefreshAntigravityModels = viewModel::refreshAntigravityModels,
                     onSetAntigravityModel = viewModel::setAntigravityModel,
                     onSetAntigravityEffort = viewModel::setAntigravityEffort,
+                    onSetAutonomyMode = viewModel::setAutonomyMode,
                     initialDebugUpdateManifestUrl = viewModel.debugUpdateManifestUrl(),
                     onSetDebugUpdateManifestUrl = viewModel::setDebugUpdateManifestUrl,
                     onClearDebugUpdateManifestUrl = viewModel::clearDebugUpdateManifestUrl,

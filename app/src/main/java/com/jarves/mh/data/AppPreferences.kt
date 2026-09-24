@@ -1,6 +1,7 @@
 package com.jarves.mh.data
 
 import android.content.Context
+import com.jarves.mh.model.AgentAutonomyMode
 import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChatAttachment
@@ -41,6 +42,15 @@ class AppPreferences(private val context: Context) {
     var primaryAgentKind: String
         get() = preferences.getString("primary_agent_kind", "") ?: ""
         set(value) { preferences.edit().putString("primary_agent_kind", value).apply() }
+
+    /**
+     * Agent tool-call autonomy mode (ISSUE-001). Everyone — including fresh
+     * installs and users upgrading from v1.0.x — starts on APPROVE_RISKY;
+     * FULLY_AUTONOMOUS is an explicit opt-in stored by stable id.
+     */
+    var agentAutonomyMode: AgentAutonomyMode
+        get() = AgentAutonomyMode.fromStored(preferences.getString("agent_autonomy_mode", null))
+        set(value) { preferences.edit().putString("agent_autonomy_mode", value.stableId).apply() }
 
     var antigravityModel: String
         get() = preferences.getString("agent_antigravity_model", "") ?: ""

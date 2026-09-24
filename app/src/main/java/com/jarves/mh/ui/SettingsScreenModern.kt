@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -60,6 +61,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -97,6 +99,7 @@ import com.jarves.mh.model.DSH_PROTOCOL_PROVIDERS
 import com.jarves.mh.model.DevStack
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
+import com.jarves.mh.model.AgentAutonomyMode
 import com.jarves.mh.model.providersForAgent
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.DiscoveredModel
@@ -106,7 +109,7 @@ import com.jarves.mh.ui.theme.AppThemeMode
 import com.jarves.mh.ui.theme.PocketOrange
 import kotlinx.coroutines.launch
 
-private enum class SettingsSection { APPEARANCE, TOOLS, RUNTIME, UPDATE_CHANNEL }
+private enum class SettingsSection { APPEARANCE, TOOLS, RUNTIME, SECURITY, UPDATE_CHANNEL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -134,6 +137,7 @@ fun SettingsScreen(
     onRefreshAntigravityModels: () -> Unit = {},
     onSetAntigravityModel: (String) -> Unit = {},
     onSetAntigravityEffort: (String) -> Unit = {},
+    onSetAutonomyMode: (AgentAutonomyMode) -> Unit = {},
     initialDebugUpdateManifestUrl: String = "",
     onSetDebugUpdateManifestUrl: (String) -> Unit = {},
     onClearDebugUpdateManifestUrl: () -> Unit = {},
@@ -372,6 +376,31 @@ fun SettingsScreen(
                                 modifier = Modifier.fillMaxWidth(),
                             ) { Text("Open Developer options") }
                         }
+                    }
+                }
+            }
+
+            item {
+                SettingsAccordion(
+                    title = "Agent permissions",
+                    subtitle = state.autonomyMode.title,
+                    icon = Icons.Default.Security,
+                    expanded = expanded == SettingsSection.SECURITY,
+                    onClick = { toggle(SettingsSection.SECURITY) },
+                ) {
+                    Text(
+                        "Controls how much freedom the agent has over tool calls. Applies from the next task.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    AgentAutonomyMode.entries.forEach { mode ->
+                        AutonomyModeRow(
+                            mode = mode,
+                            selected = state.autonomyMode == mode,
+                            onClick = { onSetAutonomyMode(mode) },
+                        )
+                        if (mode != AgentAutonomyMode.entries.last()) Spacer(Modifier.height(6.dp))
                     }
                 }
             }
@@ -859,6 +888,36 @@ private fun RuntimeInfoRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
         Text(value, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+    }
+}
+
+/** Selectable row for one agent autonomy mode (ISSUE-001). */
+@Composable
+private fun AutonomyModeRow(mode: AgentAutonomyMode, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) {
+            PocketOrange.copy(alpha = 0.12f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        },
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected, onClick = onClick)
+            Spacer(Modifier.width(4.dp))
+            Column {
+                Text(mode.title, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text(
+                    mode.summary,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 

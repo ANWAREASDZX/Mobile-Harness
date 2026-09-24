@@ -1,9 +1,7 @@
 package com.jarves.mh.runtime
 
 import android.content.Context
-import android.util.Log
 import androidx.core.content.ContextCompat
-import com.jarves.mh.BuildConfig
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.DevStack
@@ -43,6 +41,8 @@ import org.json.JSONObject
 class DshRuntimeBridge(
     private val context: Context,
     private val secretFor: (ProviderProfile) -> String?,
+    /** Current autonomy mode; read live so a settings change applies to the next session. */
+    private val autonomyProvider: () -> AgentAutonomyMode = { AgentAutonomyMode.APPROVE_RISKY },
 ) : RuntimeBridge {
     private val installer = RuntimeInstaller(context)
     private val checkpoints = WorkspaceCheckpoints(context.filesDir)
@@ -110,9 +110,11 @@ class DshRuntimeBridge(
             writeDshSettings(installed.rootfs, route, provider)
             val environment = linkedMapOf(
                 "DSH_HOME" to DSH_HOME_GUEST_PATH,
-                // Mobile Harness already confines the whole Linux guest with PRoot. Let dsh
-                // use every tool inside that boundary without an unavailable approval UI.
-                "DSH_PERMISSION_MODE" to "danger-full-access",
+                // Autonomy mode (ISSUE-001): only the explicit FULLY_AUTONOMOUS
+                // opt-in keeps danger-full-access. In the careful modes dsh runs
+                // in its default mode and denies tool calls that have no
+                // approval channel instead of approving them.
+                "DSH_PERMISSION_MODE" to AgentPermissions.dshPermissionMode(autonomyProvider()),
                 route.keyEnv to secret,
             )
             if (route.keyEnv != FALLBACK_KEY_ENV) environment.remove(FALLBACK_KEY_ENV)
@@ -121,7 +123,7 @@ class DshRuntimeBridge(
             val contextPrompt = buildContextPrompt(prompt, conversationHistory, guestWorkspacePath, projectKind)
             val command = listOf("/usr/local/bin/dsh", "--profile", "sdk")
             // Route/model diagnostics must not reach logcat in release builds (ISSUE-004).
-            if (BuildConfig.DEBUG) Log.d("DshBridge", "Route: ${route.name}, Model: ${provider.model}")
+            AppLog.d("DshBridge", "Route: ${route.name}, Model: ${provider.model}")
             val process = installer.process(
                 installed.proot,
                 installed.rootfs,
@@ -145,10 +147,10 @@ class DshRuntimeBridge(
                 prompt = contextPrompt,
             )
             val exit = process.waitFor()
-            if (BuildConfig.DEBUG) Log.d("DshBridge", "SDK process exited with code $exit")
+            AppLog.d("DshBridge", "SDK process exited with code $exit")
             val changed = checkpoints.changedFiles(workspace, before)
             if (changed.isNotEmpty()) {
-                if (BuildConfig.DEBUG) Log.d("DshBridge", "Changed files: $changed")
+                AppLog.d("DshBridge", "Changed files: $changed")
                 checkpoints.saveChangedPaths(projectId, changed)
                 val details = checkpoints.buildChangeDetails(projectId, workspace, checkpoints.readChangedPaths(projectId))
                 eventBus.emit(RuntimeEvent.FilesChanged(sessionId, details))
@@ -167,7 +169,7 @@ class DshRuntimeBridge(
                 error(sdkResult.failure.ifBlank { "DeepSeek Harness stopped with exit code $exit" })
             }
         }.onFailure { error ->
-            Log.e("DshBridge", "Session failed", error)
+            AppLog.e("DshBridge", "Session failed", error)
             val message = friendlyError(error)
             emitFailureOnce(sessionId, message)
             if (userStopRequested) {
@@ -627,7 +629,7 @@ class DshRuntimeBridge(
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, detail),
             )
         }.onFailure { error ->
-            Log.w("DshBridge", "Could not post task result notification", error)
+            AppLog.w("DshBridge", "Could not post task result notification", error)
             context.stopService(android.content.Intent(context, RuntimeExecutionService::class.java))
         }
     }

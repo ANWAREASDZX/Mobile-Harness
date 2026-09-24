@@ -140,6 +140,8 @@ class AntigravityRuntimeBridge(
     private val effort: () -> String,
     private val conversationId: (String) -> String?,
     private val saveConversationId: (String, String) -> Unit,
+    /** Current autonomy mode; read live so a settings change applies to the next session. */
+    private val autonomyProvider: () -> AgentAutonomyMode = { AgentAutonomyMode.APPROVE_RISKY },
 ) : RuntimeBridge {
     private val installer = RuntimeInstaller(context)
     private val checkpoints = WorkspaceCheckpoints(context.filesDir)
@@ -287,7 +289,12 @@ class AntigravityRuntimeBridge(
             val workspace = checkpoints.ensureWorkspace(projectId)
             checkpoints.createCheckpoint(projectId, workspace)
             val before = checkpoints.snapshot(workspace)
-            val command = antigravityCommand(model(), effort(), conversationId(projectId))
+            val command = antigravityCommand(
+                model(),
+                effort(),
+                conversationId(projectId),
+                AgentPermissions.antigravitySkipsPermissions(autonomyProvider()),
+            )
             val process = installer.process(
                 installed.proot,
                 installed.rootfs,
@@ -510,14 +517,20 @@ class AntigravityRuntimeBridge(
 
 private class AntigravitySessionException(message: String) : IllegalStateException(message)
 
-internal fun antigravityCommand(model: String, effort: String, conversationId: String?): List<String> = buildList {
+internal fun antigravityCommand(
+    model: String,
+    effort: String,
+    conversationId: String?,
+    skipPermissions: Boolean,
+): List<String> = buildList {
     add(RuntimeInstaller.AGY_GUEST_PATH)
     addAll(listOf("--input-format", "stream-json"))
     addAll(listOf("--output-format", "stream-json"))
     addAll(listOf("--print-timeout", "60m"))
-    // This is intentionally explicit and covered by tests. Antigravity tool calls
-    // do not pass through Mobile Harness approval dialogs while this mode is enabled.
-    add("--dangerously-skip-permissions")
+    // Autonomy mode (ISSUE-001): --dangerously-skip-permissions is reserved for
+    // the explicit FULLY_AUTONOMOUS opt-in. In careful modes agy's own permission
+    // gating denies calls it cannot ask about headlessly (fail-closed).
+    if (skipPermissions) add("--dangerously-skip-permissions")
     addAntigravitySelection(model, effort)
     conversationId?.takeIf(String::isNotBlank)?.let {
         addAll(listOf("--conversation", it))

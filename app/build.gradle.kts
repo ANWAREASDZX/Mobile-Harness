@@ -77,8 +77,8 @@ android {
         targetSdk = if (playBuild) 36 else 28
         // Keep literal defaults so F-Droid's static manifest parser can detect
         // the tagged release. Gradle properties may still override Play builds.
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 6
+        versionName = "1.1.0"
         providers.gradleProperty("appVersionCode").orNull?.toIntOrNull()?.let { versionCode = it }
         providers.gradleProperty("appVersionName").orNull?.let { versionName = it }
 
@@ -127,7 +127,10 @@ android {
             )
         }
         release {
-            isMinifyEnabled = false
+            // Shrinking + optimization ON (ISSUE-015, roadmap 2d). Obfuscation
+            // stays off temporarily (-dontobfuscate) until R8 is proven in the
+            // field; see proguard-rules.pro.
+            isMinifyEnabled = true
             if (hasUploadSigning) {
                 signingConfig = signingConfigs.getByName("upload")
             }
