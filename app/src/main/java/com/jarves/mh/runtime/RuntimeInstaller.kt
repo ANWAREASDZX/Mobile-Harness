@@ -44,7 +44,7 @@ data class AgentUpdateInfo(
 
 enum class RuntimeInstallEvent { STAGE, COMMAND, OUTPUT, DOWNLOAD, COMMAND_COMPLETED, COMPLETED }
 
-private data class RuntimeBundle(
+internal data class RuntimeBundle(
     val label: String,
     val fileName: String,
     val sha256: String,
@@ -80,7 +80,7 @@ class RuntimeInstaller(private val context: Context) {
         val ready = rootfsLayoutReady &&
             proot.canExecute() &&
             File(rootfs, "usr/bin/bash").exists() &&
-            rootfsMarker.readTextOrNull() == ROOTFS_VERSION &&
+            RootfsMigrationPolicy.isSupportedRootfsVersion(rootfsMarker.readTextOrNull()) &&
             File(rootfs, "usr/local/bin/node").exists() &&
             (legacyLanguageTools || coreToolsReady) &&
             coreReadyMarker.exists()
@@ -149,7 +149,9 @@ class RuntimeInstaller(private val context: Context) {
         val proot = File(context.applicationInfo.nativeLibraryDir, "libproot.so")
         require(proot.canExecute()) { "The embedded PRoot launcher is unavailable" }
 
-        if (!File(rootfs, "usr/bin/bash").exists() || rootfsMarker.readTextOrNull() != ROOTFS_VERSION) {
+        if (!File(rootfs, "usr/bin/bash").exists() ||
+            !RootfsMigrationPolicy.isSupportedRootfsVersion(rootfsMarker.readTextOrNull())
+        ) {
             onProgress(RuntimeInstallProgress("Preparing the private development runtime", 0.03f))
             val archive = obtainRuntimeBundle(
                 CORE_BUNDLE,
@@ -534,6 +536,9 @@ class RuntimeInstaller(private val context: Context) {
     private fun isSupportedCoreToolsVersion(): Boolean = coreToolsMarker.readTextOrNull() in setOf(
         CORE_TOOLS_VERSION,
         LEGACY_CORE_TOOLS_VERSION,
+        // Written by the 24.04 Core bundle (roadmap 3i); without it a migrated
+        // base would look stale and be "repaired" back to 20.04.
+        RootfsMigrationPolicy.UBUNTU_24_CORE_TOOLS_VERSION,
     )
 
     private suspend fun ensureClaudeInstalled(
@@ -929,7 +934,7 @@ class RuntimeInstaller(private val context: Context) {
      * `.pth` file in site-packages and crashes when one of them is a
      * binary metadata blob.
      */
-    private fun stripMacosMetadataArtifacts(root: File) {
+    internal fun stripMacosMetadataArtifacts(root: File) {
         if (!root.isDirectory) return
         val queue = ArrayDeque<File>()
         queue.add(root)
@@ -951,7 +956,7 @@ class RuntimeInstaller(private val context: Context) {
         }
     }
 
-    private suspend fun obtainRuntimeBundle(
+    internal suspend fun obtainRuntimeBundle(
         bundle: RuntimeBundle,
         preferEmbedded: Boolean,
         from: Float,
@@ -1224,22 +1229,25 @@ class RuntimeInstaller(private val context: Context) {
             ),
         )
         writeResolver()
-        // ISSUE-008 slice: keep the maintenance run minimal and predictable —
-        // no new recommends, and the apt cache is dropped afterwards so disk
-        // state stays comparable between devices. The full pinned-patch policy
-        // (and the Ubuntu 24.04 base) lands with the rootfs rebuild (roadmap 3i).
+        // ISSUE-008 final slice (roadmap 3i): unattended per-device
+        // `apt-get upgrade` is gone — security patches now ship inside rebuilt,
+        // digest-pinned Core bundles, so two devices on the same bundle hold
+        // identical package state (their `dpkg -l` output matches). On-device
+        // maintenance is repair-only: finish half-configured packages, let apt
+        // fix a broken dependency state, and drop the cache. A dead or EOL
+        // mirror must never block setup, so the apt steps are best-effort
+        // while the dpkg repair stays fatal.
         val command = "export DEBIAN_FRONTEND=noninteractive; " +
-            "dpkg --configure -a && " +
-            "apt-get -o DPkg::Lock::Timeout=120 -f install -y --no-install-recommends && " +
-            "apt-get -o DPkg::Lock::Timeout=120 update && " +
-            "apt-get -o DPkg::Lock::Timeout=120 upgrade -y --no-install-recommends && " +
+            "dpkg --configure -a || exit 1; " +
+            "if ! apt-get -o DPkg::Lock::Timeout=120 update; then echo 'note: apt update unavailable (offline or retired mirror)'; fi; " +
+            "if ! apt-get -o DPkg::Lock::Timeout=120 -f install -y --no-install-recommends; then echo 'note: apt repair skipped'; fi; " +
             "apt-get clean && rm -rf /var/lib/apt/lists/*"
         runGuestCommand(
             proot = proot,
             command = command,
-            displayCommand = "dpkg --configure -a && apt-get -f install -y && apt-get update && apt-get upgrade -y --no-install-recommends",
+            displayCommand = "dpkg --configure -a (repair-only maintenance, patches ship with Core bundles)",
             fraction = 0.69f,
-            timeoutMs = 35 * 60 * 1_000L,
+            timeoutMs = 20 * 60 * 1_000L,
             onProgress = onProgress,
             failureMessage = "Ubuntu maintenance could not be completed",
         )
@@ -1376,7 +1384,7 @@ class RuntimeInstaller(private val context: Context) {
         .filter { it == '\t' || it.code >= 32 }
         .take(MAX_TERMINAL_LINE)
 
-    private suspend fun verifyGuest(proot: File, command: String, failureMessage: String) {
+    internal suspend fun verifyGuest(proot: File, command: String, failureMessage: String) {
         val verify = process(
             proot = proot,
             rootfs = rootfs,
@@ -1401,7 +1409,7 @@ class RuntimeInstaller(private val context: Context) {
      * making every ELF executable misleadingly fail with ENOENT. Restore only
      * the known Ubuntu compatibility links and never replace real directories.
      */
-    private fun ensureRootfsCompatibilityLinks(): Boolean {
+    internal fun ensureRootfsCompatibilityLinks(): Boolean {
         if (!rootfs.isDirectory) return false
         val links = mapOf(
             "bin" to "usr/bin",
@@ -1601,12 +1609,16 @@ class RuntimeInstaller(private val context: Context) {
         stateFile.writeText(state.toString())
     }
 
-    private fun writeResolver() {
+    /** Writes the host's DNS resolvers into a rootfs (the active one by default). */
+    internal fun writeResolver(target: File = rootfs) {
         val manager = context.getSystemService(ConnectivityManager::class.java)
         val dns = manager.getLinkProperties(manager.activeNetwork)?.dnsServers.orEmpty()
         val servers = dns.mapNotNull { it.hostAddress }.ifEmpty { listOf("8.8.8.8", "1.1.1.1") }
-        File(rootfs, "etc/resolv.conf").writeText(servers.joinToString("\n") { "nameserver $it" } + "\n")
+        File(target, "etc/resolv.conf").writeText(servers.joinToString("\n") { "nameserver $it" } + "\n")
     }
+
+    /** Current `.pocket-rootfs-version` marker, or null when unreadable (roadmap 3i). */
+    internal fun rootfsMarkerValue(): String? = rootfsMarker.readTextOrNull()
 
     private fun extractRootfs(archive: File, destination: File) {
         val deferredLinks = mutableListOf<Pair<File, File>>()
@@ -1648,7 +1660,7 @@ class RuntimeInstaller(private val context: Context) {
         }
     }
 
-    private fun extractZstdTar(archive: File, destination: File) {
+    internal fun extractZstdTar(archive: File, destination: File) {
         val deferredLinks = mutableListOf<Pair<File, File>>()
         TarArchiveInputStream(
             ZstdCompressorInputStream(BufferedInputStream(archive.inputStream())),
@@ -1845,7 +1857,6 @@ class RuntimeInstaller(private val context: Context) {
         private const val GITHUB_CLI_RELEASE_SHA256 = "ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961"
         private const val LEGACY_README = "# Pocket Dev project\n\nThis project is managed locally on Android.\n"
         private const val LEGACY_INDEX = "<!doctype html><title>Pocket Dev</title><h1>Hello from Android</h1>\n"
-        private const val ROOTFS_VERSION = "ubuntu-20.04.5-arm64"
         private const val ROOTFS_FILE = "ubuntu-base-20.04.5-base-arm64.tar.gz"
         private const val ROOTFS_URL = "https://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/$ROOTFS_FILE"
         private const val ROOTFS_SHA256 = "f9b999afb4c4b10193087ea8c11be36d688f19e609b05179b571f29357954b52"
@@ -1853,7 +1864,7 @@ class RuntimeInstaller(private val context: Context) {
         private const val LANGUAGE_TOOLS_VERSION = "node-v24.19.0-python3-v1"
         private const val CORE_TOOLS_VERSION = "core-bundle-2026.09.5"
         private const val LEGACY_CORE_TOOLS_VERSION = "core-bundle-2026.09.4"
-        private const val SYSTEM_UPGRADE_VERSION = "ubuntu-maintenance-v2"
+        private const val SYSTEM_UPGRADE_VERSION = "ubuntu-maintenance-v3"
         private const val ANDROID_TOOLS_VERSION = "sdk36-build-tools35-gradle8.14.3-maven-2026.09"
         // Toolchain assets (ISSUE-003): served from the project's own release
         // channel (same channel as the runtime bundles) instead of a personal

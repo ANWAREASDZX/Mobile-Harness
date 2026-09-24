@@ -2153,6 +2153,8 @@ private fun RootScreenHost(
                     onSetAntigravityModel = viewModel::setAntigravityModel,
                     onSetAntigravityEffort = viewModel::setAntigravityEffort,
                     onSetAutonomyMode = viewModel::setAutonomyMode,
+                    onStartUbuntuUpgrade = viewModel::startUbuntu24Upgrade,
+                    onRollbackUbuntuBase = viewModel::rollbackUbuntuBase,
                     initialDebugUpdateManifestUrl = viewModel.debugUpdateManifestUrl(),
                     onSetDebugUpdateManifestUrl = viewModel::setDebugUpdateManifestUrl,
                     onClearDebugUpdateManifestUrl = viewModel::clearDebugUpdateManifestUrl,

@@ -139,6 +139,16 @@ Mobile Harness unites modern **Jetpack Compose UI** with a self-contained **Ubun
       <p>Chats live in a size-capped SQLite store with differential saves, and terminal history is scrubbed of credential-shaped values before it touches disk.</p>
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Recoverable Linux Base</h3>
+      <p>The private Ubuntu environment can be upgraded in place to Ubuntu 24.04 from Settings. The previous base stays on disk as a rollback until your first task completes on the new one, and an interrupted upgrade repairs itself at next start — while security patches for the base ship as verified bundle rebuilds instead of on-device <code>apt upgrade</code>.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>Verified-Only Runtime Supply Chain</h3>
+      <p>Every runtime artifact — the Core bundles, agent binaries, toolchains, and app updates — is downloaded against a digest pinned inside the app build and fails closed on mismatch. Unknown or unverified versions are never offered.</p>
+    </td>
+  </tr>
 </table>
 
 <br />

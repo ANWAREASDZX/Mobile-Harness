@@ -105,11 +105,12 @@ import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.DiscoveredModel
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.runtime.AntigravityAuthStatus
+import com.jarves.mh.runtime.UbuntuMigrationPhase
 import com.jarves.mh.ui.theme.AppThemeMode
 import com.jarves.mh.ui.theme.PocketOrange
 import kotlinx.coroutines.launch
 
-private enum class SettingsSection { APPEARANCE, TOOLS, RUNTIME, SECURITY, UPDATE_CHANNEL }
+private enum class SettingsSection { APPEARANCE, TOOLS, RUNTIME, LINUX_BASE, SECURITY, UPDATE_CHANNEL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -138,6 +139,8 @@ fun SettingsScreen(
     onSetAntigravityModel: (String) -> Unit = {},
     onSetAntigravityEffort: (String) -> Unit = {},
     onSetAutonomyMode: (AgentAutonomyMode) -> Unit = {},
+    onStartUbuntuUpgrade: () -> Unit = {},
+    onRollbackUbuntuBase: () -> Unit = {},
     initialDebugUpdateManifestUrl: String = "",
     onSetDebugUpdateManifestUrl: (String) -> Unit = {},
     onClearDebugUpdateManifestUrl: () -> Unit = {},
@@ -147,6 +150,8 @@ fun SettingsScreen(
     var terminalCleared by remember { mutableStateOf(false) }
     var showReliabilityHelp by rememberSaveable { mutableStateOf(false) }
     var stackPendingRemoval by remember { mutableStateOf<DevStack?>(null) }
+    var ubuntuUpgradePending by remember { mutableStateOf(false) }
+    var ubuntuRollbackPending by remember { mutableStateOf(false) }
 
     stackPendingRemoval?.let { stack ->
         AlertDialog(
@@ -164,6 +169,51 @@ fun SettingsScreen(
                 ) { Text("Remove", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { stackPendingRemoval = null }) { Text("Cancel") } },
+        )
+    }
+
+    if (ubuntuUpgradePending) {
+        AlertDialog(
+            onDismissRequest = { ubuntuUpgradePending = false },
+            title = { Text("Upgrade the Linux base to Ubuntu 24.04?") },
+            text = {
+                Text(
+                    "This downloads the Ubuntu 24.04 runtime (about 100 MB) and needs free storage for both environments side by side. " +
+                        "Your projects, agent conversations, and credentials are preserved. Coding agents and optional toolchains are re-downloaded onto the new base. " +
+                        "Ubuntu 20.04 remains on disk as a rollback until your first task completes successfully on 24.04 — you can also return to it manually from Settings."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        ubuntuUpgradePending = false
+                        onStartUbuntuUpgrade()
+                    },
+                ) { Text("Upgrade") }
+            },
+            dismissButton = { TextButton(onClick = { ubuntuUpgradePending = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (ubuntuRollbackPending) {
+        AlertDialog(
+            onDismissRequest = { ubuntuRollbackPending = false },
+            title = { Text("Return to Ubuntu 20.04?") },
+            text = {
+                Text(
+                    "The active Ubuntu 24.04 environment is discarded and the saved 20.04 rollback copy becomes the runtime again. " +
+                        "Your projects are untouched; agent conversations and credentials are restored from the 20.04 copy."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        ubuntuRollbackPending = false
+                        onRollbackUbuntuBase()
+                    },
+                ) { Text("Restore 20.04", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { ubuntuRollbackPending = false }) { Text("Cancel") } },
         )
     }
 
@@ -401,6 +451,92 @@ fun SettingsScreen(
                             onClick = { onSetAutonomyMode(mode) },
                         )
                         if (mode != AgentAutonomyMode.entries.last()) Spacer(Modifier.height(6.dp))
+                    }
+                }
+            }
+
+            item {
+                SettingsAccordion(
+                    title = "Linux base",
+                    subtitle = state.ubuntuBaseLabel.ifBlank { "Ubuntu 20.04.5 LTS" },
+                    icon = Icons.Default.Terminal,
+                    expanded = expanded == SettingsSection.LINUX_BASE,
+                    onClick = { toggle(SettingsSection.LINUX_BASE) },
+                ) {
+                    Text(
+                        "The private, rootless Ubuntu environment your coding agents run in. It lives entirely inside Mobile Harness's app storage.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    when {
+                        state.ubuntuMigrationRunning -> {
+                            LinearProgressIndicator(
+                                progress = { state.ubuntuMigrationProgress.coerceIn(0f, 1f) },
+                                modifier = Modifier.fillMaxWidth().height(7.dp),
+                                color = PocketOrange,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            state.ubuntuMigrationMessage?.let {
+                                Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            state.ubuntuMigrationBytes?.let { (downloaded, total) ->
+                                Text(
+                                    "${formatTransferMb(downloaded)} of ${formatTransferMb(total)}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+
+                        state.ubuntuMigrationPhase == UbuntuMigrationPhase.AWAITING_FIRST_SESSION -> {
+                            Text(
+                                "Ubuntu 24.04.5 LTS is active. The previous Ubuntu 20.04 base is kept as a rollback copy and is removed automatically after your first task completes successfully.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = { ubuntuRollbackPending = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Return to Ubuntu 20.04") }
+                        }
+
+                        state.ubuntuMigrationPhase == UbuntuMigrationPhase.DONE -> {
+                            Text(
+                                "Ubuntu 24.04.5 LTS is active. The rollback copy was removed after your first successful task.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+
+                        state.ubuntuUpgradeAvailable -> {
+                            Text(
+                                "An upgrade to Ubuntu 24.04 LTS is available (experimental). Ubuntu 20.04 reached end of life and no longer receives security patches. Your projects are untouched; agent conversations and credentials are preserved; toolchains are re-downloaded onto the new base. The 20.04 environment stays on disk as a rollback until your first task completes on 24.04.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Button(
+                                onClick = { ubuntuUpgradePending = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Upgrade to Ubuntu 24.04 (experimental)") }
+                        }
+
+                        else -> {
+                            Text(
+                                "Current base: ${state.ubuntuBaseLabel.ifBlank { "Ubuntu 20.04.5 LTS" }}. An opt-in Ubuntu 24.04 upgrade will appear here once the new runtime bundle passes the hardware compatibility matrix.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    if (!state.ubuntuMigrationRunning) {
+                        state.ubuntuMigrationMessage?.let { message ->
+                            Spacer(Modifier.height(8.dp))
+                            Text(message, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        }
                     }
                 }
             }

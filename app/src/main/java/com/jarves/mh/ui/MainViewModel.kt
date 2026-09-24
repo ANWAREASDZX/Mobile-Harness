@@ -51,6 +51,8 @@ import com.jarves.mh.runtime.AntigravityAuthStatus
 import com.jarves.mh.runtime.AntigravityRuntimeBridge
 import com.jarves.mh.runtime.NativeSpawnProcess
 import com.jarves.mh.runtime.OutputFileTailer
+import com.jarves.mh.runtime.RootfsMigration
+import com.jarves.mh.runtime.RootfsMigrationPolicy
 import com.jarves.mh.runtime.RuntimeInstallProgress
 import com.jarves.mh.runtime.RuntimeInstaller
 import com.jarves.mh.runtime.RuntimeSetupController
@@ -59,6 +61,7 @@ import com.jarves.mh.runtime.RuntimeSetupSnapshot
 import com.jarves.mh.runtime.RuntimeSetupStatus
 import com.jarves.mh.runtime.supportsArm64Runtime
 import com.jarves.mh.runtime.AndroidAppInstaller
+import com.jarves.mh.runtime.UbuntuMigrationPhase
 import com.jarves.mh.update.AppUpdateInfo
 import com.jarves.mh.update.AppUpdater
 import java.io.File
@@ -240,6 +243,14 @@ data class AppUiState(
     val agentUpdateDownloadedBytes: Long? = null,
     val agentUpdateTotalBytes: Long? = null,
     val agentUpdateBytesPerSecond: Long? = null,
+    /** Ubuntu base migration (ISSUE-008 / roadmap 3i). */
+    val ubuntuBaseLabel: String = "",
+    val ubuntuUpgradeAvailable: Boolean = false,
+    val ubuntuMigrationPhase: UbuntuMigrationPhase = UbuntuMigrationPhase.IDLE,
+    val ubuntuMigrationRunning: Boolean = false,
+    val ubuntuMigrationMessage: String? = null,
+    val ubuntuMigrationProgress: Float = 0f,
+    val ubuntuMigrationBytes: Pair<Long, Long>? = null,
     val antigravityAuth: AntigravityAuthState = AntigravityAuthState(),
     val antigravityModel: String = "",
     val antigravityEffort: String = "high",
@@ -278,6 +289,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         autonomyProvider = { preferences.agentAutonomyMode },
     )
     private val installer = RuntimeInstaller(application)
+    /** Ubuntu 20.04 → 24.04 base migration with a rollback root (ISSUE-008 / roadmap 3i). */
+    private val rootfsMigration = RootfsMigration(application, installer)
     private val antigravityRuntime = AntigravityRuntimeBridge(
         application,
         model = { _state.value.antigravityModel },
@@ -445,6 +458,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // A journal that survived this app start means the OS killed the process
         // mid-task (ISSUE-007): surface the resume banner before anything else.
         sessionJournal.read()?.let(::surfaceInterruptedSession)
+        // Ubuntu base migration (ISSUE-008 / roadmap 3i): repair a migration
+        // interrupted by process death before anything else touches the runtime.
+        // Off the main thread — reconciliation may delete a half-staged tree. The
+        // only race with bootstrap() is a rare interrupted upgrade re-reading
+        // isInstalled() mid-repair; the worst case is one extra setup retry.
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { rootfsMigration.reconcileAtStartup() }.getOrNull()
+                ?.let { message -> _state.update { it.copy(ubuntuMigrationMessage = message) } }
+            refreshUbuntuMigrationUi()
+        }
     }
 
     /** Turns a leftover journal entry into the interrupted-task banner (ISSUE-007). */
@@ -1531,6 +1554,94 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     agentUpdateBytesPerSecond = null,
                 )
             }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Ubuntu base migration (ISSUE-008 / roadmap 3i)
+    // ---------------------------------------------------------------------
+
+    private fun refreshUbuntuMigrationUi() {
+        _state.update {
+            it.copy(
+                ubuntuBaseLabel = RootfsMigrationPolicy.baseLabel(rootfsMigration.currentMarker()),
+                ubuntuUpgradeAvailable = rootfsMigration.isUpgradeAvailable(),
+                ubuntuMigrationPhase = rootfsMigration.currentState().phase,
+            )
+        }
+    }
+
+    fun startUbuntu24Upgrade() {
+        val current = _state.value
+        if (current.ubuntuMigrationRunning || current.isRunning || current.agentInstalling != null ||
+            current.agentUpdating != null || current.devStackInstalling != null || current.devStackRemoving
+        ) {
+            return
+        }
+        if (!rootfsMigration.isUpgradeAvailable()) return
+        _state.update {
+            it.copy(
+                ubuntuMigrationRunning = true,
+                ubuntuMigrationProgress = 0f,
+                ubuntuMigrationBytes = null,
+                ubuntuMigrationMessage = "Preparing the Ubuntu 24.04 upgrade…",
+            )
+        }
+        viewModelScope.launch {
+            val agent = current.agentKind
+            val stacks = current.installedDevStacks
+            val mode = preferences.agentAutonomyMode
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    rootfsMigration.migrate(agent, stacks, mode) { progress ->
+                        _state.update {
+                            it.copy(
+                                ubuntuMigrationMessage = progress.message,
+                                ubuntuMigrationProgress = progress.fraction.coerceIn(0f, 1f),
+                                ubuntuMigrationBytes = if (progress.downloadedBytes != null && progress.totalBytes != null) {
+                                    progress.downloadedBytes to progress.totalBytes
+                                } else {
+                                    it.ubuntuMigrationBytes
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+            _state.update { state ->
+                state.copy(
+                    ubuntuMigrationRunning = false,
+                    ubuntuMigrationProgress = if (result.isSuccess) 1f else 0f,
+                    ubuntuMigrationBytes = null,
+                    ubuntuMigrationMessage = result.fold(
+                        onSuccess = {
+                            "Ubuntu 24.04 is active. The previous base stays available as a rollback until your first task completes."
+                        },
+                        onFailure = { error -> error.message?.take(240) ?: "The Ubuntu 24.04 upgrade failed." },
+                    ),
+                    installedAgentVersions = installer.installedAgentVersions(),
+                    installedDevStacks = installer.installedStacks(),
+                )
+            }
+            refreshUbuntuMigrationUi()
+        }
+    }
+
+    fun rollbackUbuntuBase() {
+        val current = _state.value
+        if (current.ubuntuMigrationRunning || current.isRunning) return
+        _state.update { it.copy(ubuntuMigrationMessage = "Restoring Ubuntu 20.04…") }
+        viewModelScope.launch {
+            val restored = withContext(Dispatchers.IO) { runCatching { rootfsMigration.rollback() } }
+            _state.update { state ->
+                state.copy(
+                    ubuntuMigrationMessage = restored.fold(
+                        onSuccess = { if (it) "Ubuntu 20.04 restored. You can retry the upgrade later." else "No rollback copy was found." },
+                        onFailure = { error -> error.message?.take(240) ?: "Could not restore Ubuntu 20.04." },
+                    ),
+                )
+            }
+            refreshUbuntuMigrationUi()
         }
     }
 
@@ -3583,7 +3694,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // strike counter on success (ISSUE-007) — only repeated interruptions,
             // not a healthy workload, should ever trigger battery guidance.
             sessionJournal.clear()
-            if (event is RuntimeEvent.SessionCompleted) sessionJournal.resetInterruptions()
+            if (event is RuntimeEvent.SessionCompleted) {
+                sessionJournal.resetInterruptions()
+                // First successful task on a migrated Ubuntu 24.04 base commits
+                // the migration and deletes the rollback root (ISSUE-008 / 3i).
+                viewModelScope.launch(Dispatchers.IO) {
+                    runCatching { rootfsMigration.finalizeAfterFirstSuccessfulSession() }
+                    refreshUbuntuMigrationUi()
+                }
+            }
         }
         if (event is RuntimeEvent.FilesChanged || event is RuntimeEvent.SessionCompleted) {
             _state.value.activeProject?.id?.let { touchProject(it) }
