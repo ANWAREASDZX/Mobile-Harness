@@ -10,9 +10,11 @@ package com.jarves.mh.runtime
  * at Mobile Harness release time may be installed, and the downloaded
  * artifact must match the pinned digest — fail-closed otherwise.
  *
- * Adding a verified agent release = one entry here + an app release. The
- * long-term fix (Ed25519-signed manifests, roadmap 3k) replaces this table
- * once a project-controlled manifest feed exists; see SECURITY.md.
+ * Since v1.6.0 (roadmap 3k) this table is one of **two** trusted anchors:
+ * a project-signed update feed (Ed25519/minisign, keys pinned in
+ * [UpdateSigningKeys]) can vouch for new versions between app releases.
+ * This table remains the fallback anchor whenever the signed feed is
+ * dormant, unreachable, or fails verification.
  */
 internal object VerifiedAgentReleases {
 

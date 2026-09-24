@@ -146,7 +146,7 @@ Mobile Harness unites modern **Jetpack Compose UI** with a self-contained **Ubun
     </td>
     <td width="50%" valign="top">
       <h3>Verified-Only Runtime Supply Chain</h3>
-      <p>Every runtime artifact — the Core bundles, agent binaries, toolchains, and app updates — is downloaded against a digest pinned inside the app build and fails closed on mismatch. Unknown or unverified versions are never offered.</p>
+      <p>Every runtime artifact — the Core bundles, agent binaries, toolchains, and app updates — is downloaded against a digest pinned inside the app build and fails closed on mismatch. Unknown or unverified versions are never offered, and agent updates additionally accept a project-controlled <b>Ed25519-signed feed</b> (minisign) so new agent versions can be vouched for without an app release.</p>
     </td>
   </tr>
 </table>

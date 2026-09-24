@@ -340,31 +340,42 @@ class RuntimeInstaller(private val context: Context) {
             ?.let { put(com.jarves.mh.model.AgentKind.ANTIGRAVITY, it) }
     }
 
-    /** Checks each installed agent against its own authoritative release source. */
+    /** Checks each installed agent against trusted release sources. */
     suspend fun checkAgentUpdates(): Map<com.jarves.mh.model.AgentKind, AgentUpdateInfo> {
         val installed = installedAgentVersions()
+        // 3k / ISSUE-002 long-term fix: the project-signed feed is a trust
+        // anchor of its own — when signing keys are pinned (UpdateSigningKeys)
+        // and the feed verifies, its versions can be offered without waiting
+        // for the next app release. Unreachable or invalid feed => null and
+        // the per-release allowlist below remains the only path (fail-closed).
+        val signedFeed = fetchSignedUpdateManifest()
         return buildMap {
             installed[com.jarves.mh.model.AgentKind.CLAUDE_CODE]?.let { current ->
-                runCatching {
+                val upstream = runCatching {
                     JSONObject(fetchText("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")).getString("version")
-                }.getOrNull()?.takeIf { isVersionNewer(it, current) }?.let { latest ->
-                    put(com.jarves.mh.model.AgentKind.CLAUDE_CODE, AgentUpdateInfo(current, latest))
-                }
+                }.getOrNull()
+                newestOf(signedFeed?.claudeCode?.version, upstream)
+                    ?.takeIf { isVersionNewer(it, current) }?.let { latest ->
+                        put(com.jarves.mh.model.AgentKind.CLAUDE_CODE, AgentUpdateInfo(current, latest))
+                    }
             }
             installed[com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS]?.let { current ->
-                runCatching {
+                // Only registry releases this app build has pinned digests for
+                // are ever offered (ISSUE-002/008 — the registry is data, not
+                // trust); the signed feed is the other allowed source.
+                val upstream = runCatching {
                     JSONObject(fetchText("https://registry.npmjs.org/@deepseek-ai/dsh/latest")).getString("version")
-                }.getOrNull()
-                    // Only releases this app build has pinned digests for are ever
-                    // offered (ISSUE-002/008 — the registry is data, not trust).
-                    ?.takeIf { isVersionNewer(it, current) && VerifiedAgentReleases.isVerifiedDshRelease(it) }
-                    ?.let { latest ->
+                }.getOrNull()?.takeIf { VerifiedAgentReleases.isVerifiedDshRelease(it) }
+                newestOf(signedFeed?.deepSeekHarness?.version, upstream)
+                    ?.takeIf { isVersionNewer(it, current) }?.let { latest ->
                         put(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS, AgentUpdateInfo(current, latest))
                     }
             }
             installed[com.jarves.mh.model.AgentKind.ANTIGRAVITY]?.let { current ->
-                runCatching { fetchAgyManifest().getString("version") }.getOrNull()
-                    ?.takeIf { isVersionNewer(it, current) && VerifiedAgentReleases.isVerifiedAgyRelease(it) }?.let { latest ->
+                val upstream = runCatching { fetchAgyManifest().getString("version") }.getOrNull()
+                    ?.takeIf { VerifiedAgentReleases.isVerifiedAgyRelease(it) }
+                newestOf(signedFeed?.antigravity?.version, upstream)
+                    ?.takeIf { isVersionNewer(it, current) }?.let { latest ->
                         put(com.jarves.mh.model.AgentKind.ANTIGRAVITY, AgentUpdateInfo(current, latest))
                     }
             }
@@ -390,25 +401,39 @@ class RuntimeInstaller(private val context: Context) {
         expectedVersion: String,
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ) {
-        val latest = JSONObject(fetchText("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")).getString("version")
-        check(latest == expectedVersion) { "A newer Claude Code release appeared. Check again before updating." }
-        val base = "https://downloads.claude.ai/claude-code-releases/$latest"
-        val manifest = JSONObject(fetchText("$base/manifest.json"))
-        val checksum = manifest.getJSONObject("platforms").getJSONObject("linux-arm64").getString("checksum")
-        val downloaded = File(downloads, "claude-$latest")
-        downloadVerified("$base/linux-arm64/claude", downloaded, checksum) { bytes, total ->
+        // 3k: a signed-feed entry for exactly this version wins (URL + digest
+        // both vouched by the project key); otherwise the official
+        // downloads.claude.ai manifest path is used, as before.
+        val signed = fetchSignedUpdateManifest()?.claudeCode?.takeIf { it.version == expectedVersion }
+        val url: String
+        val checksum: String
+        val checksumAlgorithm: String
+        if (signed != null) {
+            url = signed.url
+            checksum = signed.sha512
+            checksumAlgorithm = "SHA-512"
+        } else {
+            val latest = JSONObject(fetchText("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")).getString("version")
+            check(latest == expectedVersion) { "A newer Claude Code release appeared. Check again before updating." }
+            val base = "https://downloads.claude.ai/claude-code-releases/$latest"
+            url = "$base/linux-arm64/claude"
+            checksum = JSONObject(fetchText("$base/manifest.json")).getJSONObject("platforms").getJSONObject("linux-arm64").getString("checksum")
+            checksumAlgorithm = "SHA-256"
+        }
+        val downloaded = File(downloads, "claude-$expectedVersion")
+        downloadVerified(url, downloaded, checksum, algorithm = checksumAlgorithm) { bytes, total ->
             val ratio = if (total > 0L) bytes.toFloat() / total else 0f
-            onProgress(RuntimeInstallProgress("Downloading Claude Code $latest", ratio * 0.9f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
+            onProgress(RuntimeInstallProgress("Downloading Claude Code $expectedVersion", ratio * 0.9f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
         }
         val claude = File(rootfs, CLAUDE_GUEST_PATH.removePrefix("/"))
         claude.parentFile?.mkdirs()
-        val staged = File(claude.parentFile, ".claude-$latest.installing")
+        val staged = File(claude.parentFile, ".claude-$expectedVersion.installing")
         downloaded.copyTo(staged, overwrite = true)
         Os.chmod(staged.absolutePath, 0b111101101)
         Os.rename(staged.absolutePath, claude.absolutePath)
         downloaded.delete()
         verifyGuest(runtime.proot, "$CLAUDE_GUEST_PATH --version", "Claude Code update verification failed")
-        claudeMarker.writeText(latest)
+        claudeMarker.writeText(expectedVersion)
     }
 
     private suspend fun updateAgy(
@@ -416,18 +441,30 @@ class RuntimeInstaller(private val context: Context) {
         expectedVersion: String,
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ) {
-        val manifest = fetchAgyManifest()
-        val latest = manifest.getString("version")
-        check(latest == expectedVersion) { "A newer Antigravity release appeared. Check again before updating." }
-        // ISSUE-002: the manifest's own url/sha512 are attacker-controllable when
-        // the endpoint is compromised. Only the digest pinned in this app build
-        // is trusted; an unknown version fails closed.
-        val pinnedSha512 = VerifiedAgentReleases.agyDigest(latest)
-            ?: error("Antigravity $latest has not been verified for this Mobile Harness release yet. Update the app to receive it.")
-        val downloaded = File(downloads, "antigravity-$latest-linux-arm64.tar.gz")
-        downloadVerified(manifest.getString("url"), downloaded, pinnedSha512, algorithm = "SHA-512") { bytes, total ->
+        // 3k: the signed feed wins when it vouches for exactly this version.
+        // ISSUE-002's original rule stays as the fallback: the upstream
+        // manifest's own url/sha512 are attacker-controllable when the
+        // endpoint is compromised, so only the digest pinned in this app
+        // build is trusted there; an unknown version fails closed.
+        val signed = fetchSignedUpdateManifest()?.antigravity?.takeIf { it.version == expectedVersion }
+        val tarballUrl: String
+        val tarballSha512: String
+        if (signed != null) {
+            tarballUrl = signed.url
+            tarballSha512 = signed.sha512
+        } else {
+            val manifest = fetchAgyManifest()
+            val latest = manifest.getString("version")
+            check(latest == expectedVersion) { "A newer Antigravity release appeared. Check again before updating." }
+            val pinnedSha512 = VerifiedAgentReleases.agyDigest(latest)
+                ?: error("Antigravity $latest has not been verified for this Mobile Harness release yet. Update the app to receive it.")
+            tarballUrl = manifest.getString("url")
+            tarballSha512 = pinnedSha512
+        }
+        val downloaded = File(downloads, "antigravity-$expectedVersion-linux-arm64.tar.gz")
+        downloadVerified(tarballUrl, downloaded, tarballSha512, algorithm = "SHA-512") { bytes, total ->
             val ratio = if (total > 0L) bytes.toFloat() / total else 0f
-            onProgress(RuntimeInstallProgress("Downloading Antigravity CLI $latest", ratio * 0.9f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
+            onProgress(RuntimeInstallProgress("Downloading Antigravity CLI $expectedVersion", ratio * 0.9f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
         }
         val destination = File(rootfs, AGY_GUEST_PATH.removePrefix("/"))
         var found = false
@@ -435,7 +472,7 @@ class RuntimeInstaller(private val context: Context) {
             var entry = archive.nextEntry
             while (entry != null) {
                 if (entry.isFile && entry.name.removePrefix("./") == "antigravity") {
-                    val staged = File(destination.parentFile, ".agy-$latest.installing")
+                    val staged = File(destination.parentFile, ".agy-$expectedVersion.installing")
                     FileOutputStream(staged).use { archive.copyTo(it) }
                     Os.chmod(staged.absolutePath, 0b111101101)
                     Os.rename(staged.absolutePath, destination.absolutePath)
@@ -448,7 +485,7 @@ class RuntimeInstaller(private val context: Context) {
         downloaded.delete()
         check(found) { "Antigravity update archive is incomplete" }
         verifyGuest(runtime.proot, "$AGY_GUEST_PATH --version", "Antigravity update verification failed")
-        agyMarker.writeText(latest)
+        agyMarker.writeText(expectedVersion)
     }
 
     private suspend fun updateDsh(
@@ -456,20 +493,32 @@ class RuntimeInstaller(private val context: Context) {
         expectedVersion: String,
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ) {
-        val latest = JSONObject(fetchText("https://registry.npmjs.org/@deepseek-ai/dsh/latest")).getString("version")
-        check(latest == expectedVersion) { "A newer DeepSeek Harness release appeared. Check again before updating." }
-        val quotedVersion = latest.replace(Regex("[^0-9A-Za-z.+-]"), "")
-        check(quotedVersion == latest) { "Invalid DeepSeek Harness version" }
-        // ISSUE-008: an open-ended `npm install` resolves whatever the registry
-        // serves at that moment. The tarball is downloaded and digest-verified
-        // against this build's pinned release first (the same rule as the agy
-        // updater, ISSUE-002), and npm then installs from the verified file.
-        val pinnedSha512 = VerifiedAgentReleases.dshDigest(latest)
-            ?: error("DeepSeek Harness $latest has not been verified for this Mobile Harness release yet. Update the app to receive it.")
+        val quotedVersion = expectedVersion.replace(Regex("[^0-9A-Za-z.+-]"), "")
+        check(quotedVersion == expectedVersion) { "Invalid DeepSeek Harness version" }
+        // 3k: the signed feed wins when it vouches for exactly this version.
+        // ISSUE-008's original rule stays as the fallback: an open-ended
+        // `npm install` resolves whatever the registry serves at that moment,
+        // so the tarball is digest-verified against this build's pinned
+        // release first (same rule as the agy updater, ISSUE-002), and npm
+        // then installs from the verified file.
+        val signed = fetchSignedUpdateManifest()?.deepSeekHarness?.takeIf { it.version == expectedVersion }
+        val tarballUrl: String
+        val tarballSha512: String
+        if (signed != null) {
+            tarballUrl = signed.url
+            tarballSha512 = signed.sha512
+        } else {
+            val latest = JSONObject(fetchText("https://registry.npmjs.org/@deepseek-ai/dsh/latest")).getString("version")
+            check(latest == expectedVersion) { "A newer DeepSeek Harness release appeared. Check again before updating." }
+            val pinnedSha512 = VerifiedAgentReleases.dshDigest(latest)
+                ?: error("DeepSeek Harness $latest has not been verified for this Mobile Harness release yet. Update the app to receive it.")
+            tarballUrl = "https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-$quotedVersion.tgz"
+            tarballSha512 = pinnedSha512
+        }
         val tarball = File(downloads, "dsh-$quotedVersion.tgz")
-        downloadVerified("https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-$quotedVersion.tgz", tarball, pinnedSha512, algorithm = "SHA-512") { bytes, total ->
+        downloadVerified(tarballUrl, tarball, tarballSha512, algorithm = "SHA-512") { bytes, total ->
             val ratio = if (total > 0L) bytes.toFloat() / total else 0f
-            onProgress(RuntimeInstallProgress("Downloading DeepSeek Harness $latest", ratio * 0.4f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
+            onProgress(RuntimeInstallProgress("Downloading DeepSeek Harness $expectedVersion", ratio * 0.4f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
         }
         // The runtime-bridge directory is bind-mounted into the guest at
         // /pocket-bridge, so the verified tarball is visible to npm without
@@ -496,7 +545,7 @@ class RuntimeInstaller(private val context: Context) {
         } finally {
             guestTarball.delete()
         }
-        dshMarker.writeText(latest)
+        dshMarker.writeText(expectedVersion)
         dshAndroidCompatibilityMarker.delete()
         ensureDshAndroidCompatibility()
         verifyGuest(runtime.proot, "/usr/local/bin/dsh --profile headless --help", "DeepSeek Harness update verification failed")
@@ -505,6 +554,28 @@ class RuntimeInstaller(private val context: Context) {
     private fun fetchAgyManifest(): JSONObject = JSONObject(
         fetchText("https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_arm64.json"),
     )
+
+    /**
+     * 3k (ISSUE-002 long-term fix): fetch and verify the project-signed
+     * agent update feed. Returns null — never throws — when no signing key
+     * is pinned, the feed is unreachable, or anything fails verification,
+     * leaving the per-release allowlist as the only trusted path.
+     */
+    private fun fetchSignedUpdateManifest(): SignedUpdateFeed? {
+        if (UpdateSigningKeys.publicKeys.isEmpty()) return null
+        return runCatching {
+            val body = fetchBytes(SIGNED_UPDATE_MANIFEST_URL)
+            val signature = fetchBytes("$SIGNED_UPDATE_MANIFEST_URL.minisig")
+            SignedUpdateManifest.parse(body, signature)
+        }.getOrNull()
+    }
+
+    /** The newer of two (nullable) version strings; null only when both are. */
+    private fun newestOf(left: String?, right: String?): String? {
+        if (left == null) return right
+        if (right == null) return left
+        return if (isVersionNewer(left, right)) left else right
+    }
 
     private fun isVersionNewer(candidate: String, current: String): Boolean {
         fun parts(value: String) = Regex("\\d+").findAll(value).map { it.value.toIntOrNull() ?: 0 }.toList()
@@ -1831,6 +1902,15 @@ class RuntimeInstaller(private val context: Context) {
         return connection.inputStream.bufferedReader().use { it.readText() }.also { connection.disconnect() }
     }
 
+    /** Byte-exact fetch for content whose signature covers the served bytes (3k). */
+    private fun fetchBytes(url: String): ByteArray {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.connectTimeout = 15_000
+        connection.readTimeout = 30_000
+        check(connection.responseCode in 200..299) { "Request failed with HTTP ${connection.responseCode}" }
+        return connection.inputStream.use { it.readBytes() }.also { connection.disconnect() }
+    }
+
     private fun digest(file: File, algorithm: String): String {
         val digest = MessageDigest.getInstance(algorithm)
         file.inputStream().use { input ->
@@ -1849,6 +1929,13 @@ class RuntimeInstaller(private val context: Context) {
     companion object {
         const val AGY_GUEST_PATH = "/root/.local/bin/agy"
         const val GITHUB_CLI_GUEST_PATH = "/root/.local/bin/gh"
+        // Signed agent update feed (roadmap 3k, ISSUE-002 long-term fix):
+        // a project-controlled channel on the repo's agent-updates branch.
+        // Every entry is Ed25519/minisign-signed with an offline key pinned
+        // in UpdateSigningKeys; dormant (empty keys) until activation — see
+        // docs/release/signing-agent-updates.md.
+        private const val SIGNED_UPDATE_MANIFEST_URL =
+            "https://raw.githubusercontent.com/techjarves/Mobile-Harness/agent-updates/agent-updates-manifest.json"
         private const val AGY_VERSION = "1.1.27"
         private const val AGY_RELEASE_URL = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.27-5211191891591168/linux-arm/cli_linux_arm64.tar.gz"
         private val AGY_RELEASE_SHA512: String get() = VerifiedAgentReleases.agyDigest(AGY_VERSION).orEmpty()
