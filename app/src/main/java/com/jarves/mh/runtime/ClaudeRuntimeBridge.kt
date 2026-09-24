@@ -3,6 +3,7 @@ package com.jarves.mh.runtime
 import android.content.Context
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.jarves.mh.BuildConfig
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.DiffLine
@@ -120,7 +121,7 @@ class ClaudeRuntimeBridge(
 
         var formatGateway: LocalFormatGateway? = null
         runCatching {
-            RuntimeTaskController.stopAction = {
+            RuntimeTaskController.register(sessionId) {
                 userStopRequested = true
                 val running = activeProcess
                 if (running != null) {
@@ -131,7 +132,7 @@ class ClaudeRuntimeBridge(
                     }.start()
                 }
             }
-            startForegroundRuntime(projectSlug)
+            startForegroundRuntime(projectSlug, sessionId)
             // Setup and release checks happen once in the app-start loading flow.
             // Sending a prompt must never perform network update checks or put setup
             // messages into the conversation.
@@ -145,8 +146,12 @@ class ClaudeRuntimeBridge(
                     com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES,
                 )) LocalFormatGateway(provider, secret).start() else null
             val launch = RuntimeLaunchConfigBuilder.build(provider, authToken = secret, localGatewayUrl = formatGateway?.url)
-            Log.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
-            Log.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
+            // Raw provider config, prompt-bearing command lines and agent output must
+            // never reach logcat in release builds (ISSUE-004).
+            if (BuildConfig.DEBUG) {
+                Log.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
+                Log.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
+            }
 
             // Build a context-aware prompt that includes conversation history
             val guestWorkspacePath = "/workspace/$projectSlug"
@@ -166,7 +171,7 @@ class ClaudeRuntimeBridge(
                 add("--max-turns")
                 add("25")
             }
-            Log.d("ClaudeBridge", "Launching command: $command")
+            if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Launching command: $command")
             val process = installer.process(
                 installed.proot,
                 installed.rootfs,
@@ -203,7 +208,7 @@ class ClaudeRuntimeBridge(
                             val line = pendingOutput.substring(0, newline).trimEnd('\r')
                             pendingOutput.delete(0, newline + 1)
                             if (line.isNotBlank()) {
-                                Log.d("ClaudeBridge", "OUTPUT: $line")
+                                if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "OUTPUT: $line")
                                 ProviderRuntimeErrorDetector.detect(line)?.let { reason ->
                                     process.destroyForcibly()
                                     throw ProviderSessionException(reason)
@@ -220,11 +225,11 @@ class ClaudeRuntimeBridge(
                     }
                 }
                 pendingOutput.toString().trim().takeIf(String::isNotBlank)?.let { line ->
-                    Log.d("ClaudeBridge", "TRAILING OUTPUT: $line")
+                    if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "TRAILING OUTPUT: $line")
                     if (!consumeClaudeEvent(sessionId, line)) lastDiagnostic = line.takeLast(500)
                 }
                 val exit = process.waitFor()
-                Log.d("ClaudeBridge", "Process exited with code $exit")
+                if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Process exited with code $exit")
                 permissionWatcher.cancelAndJoin()
                 pending.values.filter { it.request.sessionId == sessionId }.forEach { permission ->
                     permission.response.writeText("deny")
@@ -232,7 +237,7 @@ class ClaudeRuntimeBridge(
                 }
                 val changed = changedFiles(workspace, before)
                 if (changed.isNotEmpty()) {
-                    Log.d("ClaudeBridge", "Changed files: $changed")
+                    if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Changed files: $changed")
                     saveChangedPaths(projectId, changed)
                     val details = loadPendingChanges(projectId)
                     eventBus.emit(RuntimeEvent.FilesChanged(sessionId, details))
@@ -268,7 +273,7 @@ class ClaudeRuntimeBridge(
         formatGateway?.close()
         activeProcess = null
         activeSessionId = null
-        RuntimeTaskController.stopAction = null
+        RuntimeTaskController.unregister(sessionId)
         sessionId
     }
 
@@ -380,7 +385,7 @@ class ClaudeRuntimeBridge(
                         .ifBlank { command.orEmpty() }
                         .ifBlank { "$toolName running in project" }
 
-                    Log.d("ClaudeBridge", "Auto-approving permission request $approvalId for $toolName ($paths)")
+                    if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Auto-approving permission request $approvalId for $toolName ($paths)")
                     val response = File(file.parentFile, "$approvalId.response")
                     response.writeText("allow")
 
@@ -630,7 +635,7 @@ class ClaudeRuntimeBridge(
         sb.appendLine("If this is an Android project, the phone already provides JDK 17, Android SDK 36, ARM64 Build Tools 35.0.0, Gradle 8.14.3, and an offline Maven repository.")
         sb.appendLine("For newly created Android projects, use AGP 8.11.0, Kotlin 1.9.22, compileSdk 36, and Java 17 so the preinstalled offline toolchain can build immediately.")
         sb.appendLine("The bundled Maven cache handles the base toolchain; Gradle may download project-specific libraries normally. Set android.useAndroidX=true for AndroidX or Compose projects.")
-        sb.appendLine("PocketDev globally configures Gradle to use the SDK's ARM64 aapt2. Do not use the x86_64 Maven aapt2, investigate its architecture, or add android.aapt2FromMavenOverride to the project.")
+        sb.appendLine("Mobile Harness globally configures Gradle to use the SDK's ARM64 aapt2. Do not use the x86_64 Maven aapt2, investigate its architecture, or add android.aapt2FromMavenOverride to the project.")
         sb.appendLine("Use the installed `gradle` command for Android builds; do not ask the user to install Android Studio, an SDK, Gradle, ADB, or Termux.")
         sb.appendLine("For local servers, give a clear start command and never use a kill command that searches its own command text with pgrep, because it can terminate the terminal itself.")
         sb.appendLine("</project_workspace>")
@@ -959,12 +964,13 @@ class ClaudeRuntimeBridge(
         }.apply { isDaemon = true }.start()
     }
 
-    private fun startForegroundRuntime(projectName: String) {
+    private fun startForegroundRuntime(projectName: String, sessionId: String) {
         ContextCompat.startForegroundService(
             context,
             android.content.Intent(context, RuntimeExecutionService::class.java)
                 .setAction(RuntimeExecutionService.ACTION_START)
-                .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName),
+                .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName)
+                .putExtra(RuntimeExecutionService.EXTRA_SESSION_ID, sessionId),
         )
     }
 

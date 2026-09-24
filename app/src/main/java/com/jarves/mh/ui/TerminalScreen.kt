@@ -100,7 +100,7 @@ fun TerminalScreen(
     onToggleTheme: () -> Unit,
     themeMode: AppThemeMode,
     title: String = "Linux Terminal",
-    subtitle: String = "Ubuntu 24.04 · PRoot Sandbox",
+    subtitle: String = "Ubuntu 20.04 · PRoot Sandbox",
     liveOutput: String = "",
     currentCommand: String? = null,
     commandDraft: String? = null,

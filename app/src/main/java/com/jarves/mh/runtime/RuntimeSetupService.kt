@@ -135,6 +135,10 @@ object RuntimeSetupController {
                 logs = (current.logs + "✓ Setup completed successfully").takeLast(MAX_LOG_LINES),
             ),
         )
+        // The full setup log exists only for diagnostics; drop it once setup succeeded
+        // so raw installer output does not linger on disk (ISSUE-004/023). It is kept
+        // after a failure, where it is actually needed for troubleshooting.
+        runCatching { logFile(context).delete() }
     }
 
     @Synchronized

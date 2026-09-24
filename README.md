@@ -425,6 +425,12 @@ Mobile Harness is currently intended for signed direct APK distribution and priv
 
 <br />
 
+## Security
+
+**Read this before importing third-party code.** In the current release (v1.0.4), all three coding agents run with **tool permissions auto-approved by design**: Claude Code's generated settings auto-allow tools such as Bash, Edit, and Write; DeepSeek Harness runs with `DSH_PERMISSION_MODE=danger-full-access`; Antigravity runs with `--dangerously-skip-permissions`. This keeps the agents fully autonomous on-device, but it also means an agent can run commands — including network commands — inside the PRoot sandbox **without asking you first**, and your provider API key is exposed to that environment. Treat imported repositories and pasted prompts from unknown sources as untrusted: a README or tool output can carry prompt-injection instructions the agent may act on. An interactive approval mode is on the roadmap. Full details, boundaries, and what is already hardened are documented in [SECURITY.md](SECURITY.md).
+
+<br />
+
 ## Legal & Trademarks
 
 * Mobile Harness is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Anthropic.

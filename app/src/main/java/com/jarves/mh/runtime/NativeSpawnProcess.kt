@@ -17,6 +17,14 @@ internal class NativeSpawnProcess private constructor(
     @Volatile private var result: Int? = null
 
     override fun getOutputStream(): OutputStream = stdin
+
+    /**
+     * Streams the child's captured output file. Unlike a pipe, this stream has
+     * *moving-EOF* semantics: `read()` returns -1 whenever the child has not
+     * flushed more output yet — not only after the process exits. Never treat a
+     * single EOF as "process finished"; combine it with [isAlive] / [waitFor],
+     * or re-read with a growing offset as the bridges do.
+     */
     override fun getInputStream(): InputStream = FileInputStream(outputFile)
     override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
 

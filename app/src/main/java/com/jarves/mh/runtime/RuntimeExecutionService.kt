@@ -5,17 +5,32 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.jarves.mh.MainActivity
 import com.jarves.mh.R
+import java.util.concurrent.ConcurrentHashMap
 
 internal object RuntimeTaskController {
-    @Volatile var stopAction: (() -> Unit)? = null
+    // Session-keyed stop registry (ISSUE-025): the three bridges used to share one
+    // volatile slot, so a second session could clobber the first one's stop handler.
+    private val stopActions = ConcurrentHashMap<String, () -> Unit>()
 
-    fun requestStop() {
-        stopAction?.invoke()
+    fun register(sessionId: String, action: () -> Unit) {
+        stopActions[sessionId] = action
+    }
+
+    fun unregister(sessionId: String) {
+        stopActions.remove(sessionId)
+    }
+
+    /** Stops one session, or every registered session when [sessionId] is null. */
+    fun requestStop(sessionId: String? = null) {
+        val actions = if (sessionId != null) listOfNotNull(stopActions[sessionId]) else stopActions.values.toList()
+        actions.forEach { action -> runCatching(action) }
     }
 }
 
@@ -25,6 +40,7 @@ class RuntimeExecutionService : Service() {
     private var notificationTitle: String = "Mobile Harness is working"
     private var canStop: Boolean = true
     private var taskRunning: Boolean = false
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
@@ -37,11 +53,12 @@ class RuntimeExecutionService : Service() {
         if (intent?.hasExtra(EXTRA_CAN_STOP) == true) canStop = intent.getBooleanExtra(EXTRA_CAN_STOP, true)
         when (intent?.action ?: ACTION_START) {
             ACTION_STOP -> {
-                RuntimeTaskController.requestStop()
+                RuntimeTaskController.requestStop(intent?.getStringExtra(EXTRA_SESSION_ID))
                 getSystemService(NotificationManager::class.java).notify(
                     RUNNING_NOTIFICATION_ID,
                     runningNotification("Stopping safely…", includeStop = false),
                 )
+                scheduleStopSafeguard()
             }
             ACTION_PROGRESS -> {
                 // Live step updates only matter while a task is actually running.
@@ -70,6 +87,7 @@ class RuntimeExecutionService : Service() {
                 stopSelf()
             }
             else -> {
+                mainHandler.removeCallbacksAndMessages(null)
                 taskRunning = true
                 startForeground(
                     RUNNING_NOTIFICATION_ID,
@@ -79,6 +97,24 @@ class RuntimeExecutionService : Service() {
             }
         }
         return START_NOT_STICKY
+    }
+
+    /**
+     * Safety net for a STOP that arrives with no live session to confirm completion
+     * (ISSUE-036): drop the transient "Stopping safely…" notification and stop the
+     * service so neither can linger as an orphan.
+     */
+    private fun scheduleStopSafeguard() {
+        mainHandler.removeCallbacksAndMessages(null)
+        mainHandler.postDelayed(
+            {
+                if (!taskRunning) {
+                    getSystemService(NotificationManager::class.java).cancel(RUNNING_NOTIFICATION_ID)
+                    stopSelf()
+                }
+            },
+            STOP_SAFEGUARD_MS,
+        )
     }
 
     private fun runningNotification(detail: String, includeStop: Boolean): android.app.Notification {
@@ -160,12 +196,14 @@ class RuntimeExecutionService : Service() {
         const val EXTRA_DETAIL = "detail"
         const val EXTRA_TITLE = "title"
         const val EXTRA_CAN_STOP = "can_stop"
+        const val EXTRA_SESSION_ID = "session_id"
 
         private const val RUNNING_CHANNEL_ID = "runtime"
         private const val RESULT_CHANNEL_ID = "task-results"
         private const val RUNNING_NOTIFICATION_ID = 41
         private const val RESULT_NOTIFICATION_ID = 42
         private const val MAX_WAKE_LOCK_MS = 90 * 60 * 1_000L
+        private const val STOP_SAFEGUARD_MS = 10_000L
 
         fun ensureNotificationChannels(context: android.content.Context) {
             val manager = context.getSystemService(NotificationManager::class.java)

@@ -278,11 +278,11 @@ class AntigravityRuntimeBridge(
         }
 
         runCatching {
-            RuntimeTaskController.stopAction = {
+            RuntimeTaskController.register(sessionId) {
                 userStopRequested = true
                 activeProcess?.destroy()
             }
-            startForegroundRuntime(projectSlug)
+            startForegroundRuntime(projectSlug, sessionId)
             val installed = installer.installedRuntime()
             val workspace = checkpoints.ensureWorkspace(projectId)
             checkpoints.createCheckpoint(projectId, workspace)
@@ -376,7 +376,7 @@ class AntigravityRuntimeBridge(
         }
         activeProcess = null
         activeSessionId = null
-        RuntimeTaskController.stopAction = null
+        RuntimeTaskController.unregister(sessionId)
         sessionId
     }
 
@@ -455,12 +455,13 @@ class AntigravityRuntimeBridge(
         if (finished.add(sessionId)) eventBus.emit(RuntimeEvent.SessionFailed(sessionId, reason))
     }
 
-    private fun startForegroundRuntime(projectName: String) {
+    private fun startForegroundRuntime(projectName: String, sessionId: String) {
         ContextCompat.startForegroundService(
             context,
             android.content.Intent(context, RuntimeExecutionService::class.java)
                 .setAction(RuntimeExecutionService.ACTION_START)
-                .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName),
+                .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName)
+                .putExtra(RuntimeExecutionService.EXTRA_SESSION_ID, sessionId),
         )
     }
 
@@ -515,7 +516,7 @@ internal fun antigravityCommand(model: String, effort: String, conversationId: S
     addAll(listOf("--output-format", "stream-json"))
     addAll(listOf("--print-timeout", "60m"))
     // This is intentionally explicit and covered by tests. Antigravity tool calls
-    // do not pass through PocketDev approval dialogs while this mode is enabled.
+    // do not pass through Mobile Harness approval dialogs while this mode is enabled.
     add("--dangerously-skip-permissions")
     addAntigravitySelection(model, effort)
     conversationId?.takeIf(String::isNotBlank)?.let {

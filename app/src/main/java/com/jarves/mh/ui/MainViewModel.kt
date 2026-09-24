@@ -321,6 +321,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     init {
+        // Surface silent Keystore invalidation (e.g. after a backup restore or clear
+        // data) instead of behaving as if no API key had ever been saved (ISSUE-030).
+        vault.onSecretInvalidated = { providerId ->
+            _state.update {
+                it.copy(toastMessage = "The saved $providerId key could not be decrypted (Android Keystore was reset). Please re-enter it in Settings.")
+            }
+        }
+        // Remove orphaned process output files left behind by crashed runs (ISSUE-023).
+        viewModelScope.launch(Dispatchers.IO) { cleanupStaleCacheFiles() }
         // GitHub's official CLI owns its OAuth credential. Remove credentials from
         // the retired custom OAuth implementation and discover the real CLI status.
         vault.remove(LEGACY_GITHUB_TOKEN_KEY)
@@ -404,17 +413,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Deletes orphaned process output files left by earlier, dead processes (ISSUE-023). */
+    private fun cleanupStaleCacheFiles() {
+        val cutoff = System.currentTimeMillis() - STALE_CACHE_GRACE_MS
+        val cache = getApplication<Application>().cacheDir
+        cache.listFiles()?.forEach { file ->
+            if (!file.isFile) return@forEach
+            val stale = file.lastModified() < cutoff
+            val known = STALE_CACHE_PREFIXES.any { file.name.startsWith(it) }
+            if (stale && known) runCatching { file.delete() }
+        }
+    }
+
     val state: StateFlow<AppUiState> = _state.asStateFlow()
 
-    private val _terminalLines = MutableStateFlow<List<TerminalOutputLine>>(
-        listOf(
-            TerminalOutputLine(
-                command = "uname -a",
-                output = "Linux pocket-dev 6.1.0-arm64 #1 SMP aarch64 GNU/Linux (PRoot Sandbox)",
-                exitCode = 0,
-            ),
-        ),
-    )
+    // Terminal history starts empty: earlier releases seeded a fake `uname -a`
+    // banner with a made-up kernel string (ISSUE-016).
+    private val _terminalLines = MutableStateFlow<List<TerminalOutputLine>>(emptyList())
     val terminalLines: StateFlow<List<TerminalOutputLine>> = _terminalLines.asStateFlow()
 
     private val _isTerminalRunning = MutableStateFlow(false)
@@ -485,6 +500,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val exit = proc.waitFor()
                     runCatching { proc.outputStream.close() }
                     val out = sanitizeTerminalOutput(streamed.toString()).trim()
+                        .let { body -> if (autoConfirmed) body + AUTO_CONFIRMED_NOTE else body }
                     val finalOut = if (out.isNotEmpty() || exit == 0) out else "Process exited with code $exit"
                     finalOut to exit
                 }.getOrElse { "Error: ${it.message}" to 1 }
@@ -714,6 +730,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val cleanOutput = sanitizeTerminalOutput(raw.substringBefore(marker))
             .trim()
             .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
+            .let { body -> if (autoConfirmed) body + AUTO_CONFIRMED_NOTE else body }
         return ProjectTerminalResult(cleanOutput, exitCode, cwdAfter)
     }
 
@@ -2248,7 +2265,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             "GH_NO_UPDATE_NOTIFIER" to "1",
                         )
                         val installed = installer.installedRuntime()
-                        val command = if (useGitHubCli && repositoryName != null) {
+                        val cloneCommand = if (useGitHubCli && repositoryName != null) {
                             buildList {
                                 addAll(listOf(RuntimeInstaller.GITHUB_CLI_GUEST_PATH, "repo", "clone", repositoryName, ".", "--", "--progress", "--single-branch"))
                                 branch?.takeIf(String::isNotBlank)?.let { addAll(listOf("--branch", it)) }
@@ -2261,6 +2278,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 add(".")
                             }
                         }
+                        // Wrap the clone in coreutils `timeout` so a hung remote or stalled
+                        // network cannot keep the import spinning forever (ISSUE-027).
+                        val command = listOf("timeout", GIT_CLONE_TIMEOUT) + cloneCommand
                         _state.update { it.copy(gitCloneMessage = "Cloning ${repositoryName ?: normalized.substringAfterLast('/').removeSuffix(".git")}…") }
                         val process = installer.process(
                             installed.proot,
@@ -2518,7 +2538,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         "GH_PROMPT_DISABLED" to "1",
         "GH_NO_UPDATE_NOTIFIER" to "1",
         // Android PRoot has no Secret Service. This keeps the official gh-owned
-        // credential in PocketDev's private Linux home instead of exporting it.
+        // credential in Mobile Harness's private Linux home instead of exporting it.
         "BROWSER" to "/bin/false",
     )
 
@@ -3529,6 +3549,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val MAX_VISIBLE_WORKSPACE_ENTRIES = 2_000
         private const val MAX_PROJECT_TERMINAL_HISTORY = 100
         private const val MAX_PROJECT_TERMINAL_OUTPUT = 200_000
+
+        /** Hard ceiling for repository imports; coreutils duration syntax (ISSUE-027). */
+        private const val GIT_CLONE_TIMEOUT = "15m"
+
+        /** Visible marker appended to terminal history when a Y/N prompt was answered automatically (ISSUE-038). */
+        private const val AUTO_CONFIRMED_NOTE = "\n[mobile-harness] auto-confirmed a package prompt (\"y\") on your behalf"
+
+        /** Only files older than this grace window are cleaned at boot, so freshly
+         *  created outputs of a just-started session are never touched (ISSUE-023). */
+        private const val STALE_CACHE_GRACE_MS = 5 * 60_000L
+        private val STALE_CACHE_PREFIXES = listOf(
+            "runtime-output-",
+            "git-clone-",
+            "github-auth-",
+            "github-cli-",
+            "agy-hello-",
+            "antigravity-auth-output",
+            "antigravity-logout-output",
+        )
         private const val MAX_ATTACHMENTS_PER_MESSAGE = 5
         private const val MAX_ATTACHMENT_BYTES = 25L * 1024L * 1024L
         private const val MAX_IMPORTED_PROJECT_BYTES = 8L * 1024L * 1024L * 1024L

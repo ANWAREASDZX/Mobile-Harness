@@ -113,7 +113,7 @@ class RuntimeInstaller(private val context: Context) {
         )
     }
 
-    /** Removes only scaffolding written automatically by earlier PocketDev alpha builds. */
+    /** Removes only scaffolding written automatically by earlier Mobile Harness alpha builds. */
     fun cleanupLegacyWorkspaceScaffolding() {
         val workspaces = File(context.filesDir, "workspaces")
         workspaces.listFiles { file -> file.isDirectory }.orEmpty().forEach { workspace ->
@@ -272,7 +272,7 @@ class RuntimeInstaller(private val context: Context) {
     suspend fun ensureGitHubCliInstalled(onProgress: suspend (RuntimeInstallProgress) -> Unit) {
         if (isGitHubCliInstalled()) return
         check(!BuildConfig.OFFLINE_RUNTIME_BUNDLES) {
-            "GitHub sign-in needs the PocketDev online APK."
+            "GitHub sign-in needs the Mobile Harness online APK."
         }
         writeResolver()
         downloads.mkdirs()
@@ -618,7 +618,7 @@ class RuntimeInstaller(private val context: Context) {
         var source = file.readText()
         if (callAfter in source && importAfter in source) return
         check(callBefore in source && importBefore in source) {
-            "DeepSeek Harness $DSH_VERSION is not compatible with this PocketDev build"
+            "DeepSeek Harness $DSH_VERSION is not compatible with this Mobile Harness build"
         }
         source = source.replace(importBefore, importAfter).replace(callBefore, callAfter)
         file.writeText(source)

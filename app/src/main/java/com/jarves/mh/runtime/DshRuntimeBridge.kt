@@ -3,6 +3,7 @@ package com.jarves.mh.runtime
 import android.content.Context
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.jarves.mh.BuildConfig
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.DevStack
@@ -85,7 +86,7 @@ class DshRuntimeBridge(
         }
 
         runCatching {
-            RuntimeTaskController.stopAction = {
+            RuntimeTaskController.register(sessionId) {
                 userStopRequested = true
                 val running = activeProcess
                 if (running != null) {
@@ -96,7 +97,7 @@ class DshRuntimeBridge(
                     }.start()
                 }
             }
-            startForegroundRuntime(projectSlug)
+            startForegroundRuntime(projectSlug, sessionId)
             val installed = installer.installedRuntime()
             check(installer.isAgentInstalled(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS)) {
                 "DeepSeek Harness is not installed. Open Settings → Coding agent to install it."
@@ -109,7 +110,7 @@ class DshRuntimeBridge(
             writeDshSettings(installed.rootfs, route, provider)
             val environment = linkedMapOf(
                 "DSH_HOME" to DSH_HOME_GUEST_PATH,
-                // PocketDev already confines the whole Linux guest with PRoot. Let dsh
+                // Mobile Harness already confines the whole Linux guest with PRoot. Let dsh
                 // use every tool inside that boundary without an unavailable approval UI.
                 "DSH_PERMISSION_MODE" to "danger-full-access",
                 route.keyEnv to secret,
@@ -119,7 +120,8 @@ class DshRuntimeBridge(
             val guestWorkspacePath = "/workspace/$projectSlug"
             val contextPrompt = buildContextPrompt(prompt, conversationHistory, guestWorkspacePath, projectKind)
             val command = listOf("/usr/local/bin/dsh", "--profile", "sdk")
-            Log.d("DshBridge", "Route: ${route.name}, Model: ${provider.model}")
+            // Route/model diagnostics must not reach logcat in release builds (ISSUE-004).
+            if (BuildConfig.DEBUG) Log.d("DshBridge", "Route: ${route.name}, Model: ${provider.model}")
             val process = installer.process(
                 installed.proot,
                 installed.rootfs,
@@ -143,10 +145,10 @@ class DshRuntimeBridge(
                 prompt = contextPrompt,
             )
             val exit = process.waitFor()
-            Log.d("DshBridge", "SDK process exited with code $exit")
+            if (BuildConfig.DEBUG) Log.d("DshBridge", "SDK process exited with code $exit")
             val changed = checkpoints.changedFiles(workspace, before)
             if (changed.isNotEmpty()) {
-                Log.d("DshBridge", "Changed files: $changed")
+                if (BuildConfig.DEBUG) Log.d("DshBridge", "Changed files: $changed")
                 checkpoints.saveChangedPaths(projectId, changed)
                 val details = checkpoints.buildChangeDetails(projectId, workspace, checkpoints.readChangedPaths(projectId))
                 eventBus.emit(RuntimeEvent.FilesChanged(sessionId, details))
@@ -180,7 +182,7 @@ class DshRuntimeBridge(
         }
         activeProcess = null
         activeSessionId = null
-        RuntimeTaskController.stopAction = null
+        RuntimeTaskController.unregister(sessionId)
         sessionId
     }
 
@@ -542,10 +544,10 @@ class DshRuntimeBridge(
             sb.appendLine("If this is an Android project, the phone already provides JDK 17, Android SDK 36, ARM64 Build Tools 35.0.0, Gradle 8.14.3, and an offline Maven repository.")
             sb.appendLine("For newly created Android projects, use AGP 8.11.0, Kotlin 1.9.22, compileSdk 36, and Java 17 so the preinstalled offline toolchain can build immediately.")
             sb.appendLine("The bundled Maven cache handles the base toolchain; Gradle may download project-specific libraries normally. Set android.useAndroidX=true for AndroidX or Compose projects.")
-            sb.appendLine("PocketDev globally configures Gradle to use the SDK's ARM64 aapt2. Do not use the x86_64 Maven aapt2, investigate its architecture, or add android.aapt2FromMavenOverride to the project.")
+            sb.appendLine("Mobile Harness globally configures Gradle to use the SDK's ARM64 aapt2. Do not use the x86_64 Maven aapt2, investigate its architecture, or add android.aapt2FromMavenOverride to the project.")
             sb.appendLine("Use the installed `gradle` command for Android builds; do not ask the user to install Android Studio, an SDK, Gradle, ADB, or Termux.")
         } else {
-            sb.appendLine("The optional Android build toolchain is not installed in this PocketDev runtime. You may create Android project files, but do not claim that Gradle, the Android SDK, or aapt2 is available and do not present build or install commands as verified. Tell the user to add the Android development stack in PocketDev Settings before building.")
+            sb.appendLine("The optional Android build toolchain is not installed in this Mobile Harness runtime. You may create Android project files, but do not claim that Gradle, the Android SDK, or aapt2 is available and do not present build or install commands as verified. Tell the user to add the Android development stack in Mobile Harness Settings before building.")
         }
         sb.appendLine("For local servers, give a clear start command and never use a kill command that searches its own command text with pgrep, because it can terminate the terminal itself.")
         sb.appendLine("</project_workspace>")
@@ -601,12 +603,13 @@ class DshRuntimeBridge(
         return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, seconds) else "%d:%02d".format(minutes, seconds)
     }
 
-    private fun startForegroundRuntime(projectName: String) {
+    private fun startForegroundRuntime(projectName: String, sessionId: String) {
         ContextCompat.startForegroundService(
             context,
             android.content.Intent(context, RuntimeExecutionService::class.java)
                 .setAction(RuntimeExecutionService.ACTION_START)
-                .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName),
+                .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName)
+                .putExtra(RuntimeExecutionService.EXTRA_SESSION_ID, sessionId),
         )
     }
 

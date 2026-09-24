@@ -397,7 +397,7 @@ private fun AntigravityOnboardingScreen(
         ) {
             Text("Connect your Google account", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
             Text(
-                "PocketDev runs Google's official agy CLI inside its private Linux environment. Google handles authentication and agy owns the saved session.",
+                "Mobile Harness runs Google's official agy CLI inside its private Linux environment. Google handles authentication and agy owns the saved session.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             when (state.antigravityAuth.status) {
@@ -462,7 +462,7 @@ private fun AntigravityOnboardingScreen(
             }
             Surface(color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f), shape = RoundedCornerShape(14.dp)) {
                 Text(
-                    "Automatic tool approval is enabled for Antigravity. It can edit project files and run commands without confirmation. Changes remain reviewable in PocketDev.",
+                    "Automatic tool approval is enabled for Antigravity. It can edit project files and run commands without confirmation. Changes remain reviewable in Mobile Harness.",
                     Modifier.fillMaxWidth().padding(14.dp),
                     color = MaterialTheme.colorScheme.onErrorContainer,
                     fontSize = 12.sp,
@@ -3423,7 +3423,7 @@ private fun ProjectsScreen(
                                 letterSpacing = 2.sp,
                             )
                         }
-                        Text("Tap the code to copy it. PocketDev will connect automatically after approval.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Tap the code to copy it. Mobile Harness will connect automatically after approval.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         OutlinedButton(
                             onClick = onGenerateNewGitHubCode,
                             modifier = Modifier.fillMaxWidth(),
@@ -5378,6 +5378,11 @@ private fun PreviewTab(ready: Boolean, url: String?) {
                         webView = this
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
+                        // Defense in depth (ISSUE-011): preview only ever renders loopback
+                        // URLs, and file/content access stays explicitly off even though
+                        // the loopback checks already block those schemes.
+                        settings.allowFileAccess = false
+                        settings.allowContentAccess = false
                         webChromeClient = object : WebChromeClient() {
                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                 loading = newProgress < 100
@@ -5431,7 +5436,9 @@ private fun normalizePreviewUrl(input: String): String? {
 }
 
 private fun Uri.isLoopbackPreviewUrl(): Boolean =
-    scheme in setOf("data", "blob", "about") ||
+    // "data:" intentionally excluded (ISSUE-011): it escapes the loopback policy and
+    // can carry arbitrary payloads. blob:/about: remain for modern dev-server UIs.
+    scheme in setOf("blob", "about") ||
         (scheme in setOf("http", "https", "ws", "wss") && host in setOf("127.0.0.1", "localhost", "0.0.0.0"))
 
 private fun blockedPreviewResponse(): WebResourceResponse =
