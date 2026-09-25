@@ -2,6 +2,7 @@ package com.jarves.mh.runtime
 
 import android.content.Context
 import androidx.core.content.ContextCompat
+import com.jarves.mh.model.AgentAutonomyMode
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.DevStack

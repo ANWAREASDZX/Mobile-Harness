@@ -79,7 +79,12 @@ internal class ConversationStore private constructor(
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit // v1: no prior schema
 
         override fun onConfigure(db: SQLiteDatabase) {
-            db.setWriteAheadLoggingEnabled(true)
+            // WAL is the platform default for targetSdk >= P (28). The explicit
+            // setter was removed from SDK 36; its replacement is only public
+            // from API 35, so belt-and-braces enablement is guarded.
+            if (android.os.Build.VERSION.SDK_INT >= 35) {
+                runCatching { db.enableWriteAheadLogging() }
+            }
             db.setForeignKeyConstraintsEnabled(true)
         }
     }

@@ -2,6 +2,7 @@ package com.jarves.mh.runtime
 
 import android.content.Context
 import androidx.core.content.ContextCompat
+import com.jarves.mh.model.AgentAutonomyMode
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ProviderKind
@@ -24,6 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.json.JSONArray
+import kotlinx.coroutines.CoroutineScope
 
 internal object ProviderRuntimeErrorDetector {
     fun detect(line: String): String? {
@@ -419,7 +421,7 @@ class ClaudeRuntimeBridge(
      * paths fail CLOSED: an unreadable request, a parse failure, or a timeout
      * writes "deny" — never "allow".
      */
-    private fun CoroutineScope.watchPermissionRequests(sessionId: String) {
+    private suspend fun CoroutineScope.watchPermissionRequests(sessionId: String) {
         val bridge = File(context.filesDir, "runtime-bridge")
         val inFlight = ConcurrentHashMap.newKeySet<String>()
         while (coroutineContext.isActive) {

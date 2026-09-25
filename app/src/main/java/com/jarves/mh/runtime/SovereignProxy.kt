@@ -53,7 +53,7 @@ internal object ProxyUsageRegistry {
  * only when talking to the real upstream.
  *
  * The guest agent is pointed at `http://127.0.0.1:<port>/t/<token>` and never
- * receives the real key, so `/proc/*/environ` inside the PRoot guest exposes
+ * receives the real key, so `/proc/<pid>/environ` inside the PRoot guest exposes
  * no secrets. Built on the same hardening as the format gateway (2f):
  *  - random 128-bit path token, 403 before anything is read;
  *  - request bodies capped at [MAX_BODY_BYTES] (413) and header lines at

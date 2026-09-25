@@ -110,7 +110,7 @@ class SovereignProxyTest {
 
     /** Sends one request to the proxy and returns (status, body). */
     private fun request(proxy: SovereignProxy, path: String? = null, body: String = """{"m":"hi"}""", tokenOverride: String? = null): Pair<Int, String> {
-        Socket("127.0.0.1", proxy.url.substringAfterLast(":").substringBefore("/")).use { socket ->
+        Socket("127.0.0.1", proxy.url.substringAfterLast(":").substringBefore("/").toInt()).use { socket ->
             socket.soTimeout = 15_000
             val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream()))
             val target = path ?: "/t/${proxy.url.substringAfter("/t/")}/v1/messages"
@@ -211,7 +211,7 @@ class SovereignProxyTest {
             proxy.start()
             // Claim 40 MB without sending it: the proxy must answer 413 from
             // the header alone.
-            Socket("127.0.0.1", proxy.url.substringAfterLast(":").substringBefore("/")).use { socket ->
+            Socket("127.0.0.1", proxy.url.substringAfterLast(":").substringBefore("/").toInt()).use { socket ->
                 socket.soTimeout = 15_000
                 val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream()))
                 writer.write("POST /t/${proxy.url.substringAfter("/t/")}/v1/messages HTTP/1.1\r\n")

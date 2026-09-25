@@ -13,7 +13,7 @@ data class RuntimeLaunchConfig(
  * Placeholder secret handed to agents whose real credential is injected by the
  * [SovereignProxy] or the [LocalFormatGateway] on the host side (ISSUE-010).
  * The CLI only needs a non-empty value to start; the guest process env never
- * carries the real key, so `/proc/*/environ` stays secret-free.
+ * carries the real key, so `/proc/<pid>/environ` stays secret-free.
  */
 const val PROXY_MANAGED_SECRET = "mobile-harness-proxy"
 

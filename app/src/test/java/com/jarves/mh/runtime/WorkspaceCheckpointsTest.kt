@@ -30,6 +30,7 @@ class WorkspaceCheckpointsTest {
 
         // 50 MB of pseudo-random binary content (guaranteed zero bytes).
         val big = File(workspace, "assets/blob.bin")
+        big.parentFile?.mkdirs()
         Random(42).let { random ->
             big.outputStream().use { output ->
                 val chunk = ByteArray(1024 * 1024)
@@ -57,6 +58,7 @@ class WorkspaceCheckpointsTest {
         store.createCheckpoint("p2", workspace)
 
         val large = File(workspace, "logs/generated.log")
+        large.parentFile?.mkdirs()
         large.printWriter().use { writer ->
             repeat(400_000) { writer.println("line $it with some text to cross the size cap") }
         }
@@ -89,6 +91,7 @@ class WorkspaceCheckpointsTest {
     fun `agent state directories never enter a baseline or a changes manifest`() {
         val store = newStore()
         val workspace = store.ensureWorkspace("p4")
+        File(workspace, "src").mkdirs()
         File(workspace, "src/Main.kt").writeText("fun main() {}\n")
         File(workspace, ".dsh/session.json").apply { parentFile.mkdirs() }.writeText("{}")
         File(workspace, ".agy/state.db").apply { parentFile.mkdirs() }.writeText("x")

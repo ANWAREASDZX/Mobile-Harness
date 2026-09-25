@@ -756,24 +756,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ?: return ProjectTerminalResult("Unsupported terminal process.", 1, cwd)
         val output = StringBuilder()
         var autoConfirmed = false
-        OutputFileTailer.tailChunks(native.outputFile, process::isAlive) { chunk ->
-            output.append(chunk)
-            val visible = sanitizeTerminalOutput(output.toString().substringBefore(marker))
-                .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
-            if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, visible)) {
-                process.outputStream.write("y\n".toByteArray())
-                process.outputStream.flush()
-                autoConfirmed = true
-            }
-            val detectedPreviewUrl = detectPreviewUrl(visible)
-            _state.update { current ->
-                if (current.activeProject?.id == projectId) {
-                    current.copy(
-                        projectTerminalLiveOutput = visible,
-                        previewReady = current.previewReady || detectedPreviewUrl != null,
-                        previewUrl = detectedPreviewUrl ?: current.previewUrl,
-                    )
-                } else current
+        // Blocking reader on an IO dispatcher (the pre-tailer loop blocked here
+        // too); tailChunks is suspend, so bridge it with runBlocking.
+        kotlinx.coroutines.runBlocking {
+            OutputFileTailer.tailChunks(native.outputFile, process::isAlive) { chunk ->
+                output.append(chunk)
+                val visible = sanitizeTerminalOutput(output.toString().substringBefore(marker))
+                    .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
+                if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, visible)) {
+                    process.outputStream.write("y\n".toByteArray())
+                    process.outputStream.flush()
+                    autoConfirmed = true
+                }
+                val detectedPreviewUrl = detectPreviewUrl(visible)
+                _state.update { current ->
+                    if (current.activeProject?.id == projectId) {
+                        current.copy(
+                            projectTerminalLiveOutput = visible,
+                            previewReady = current.previewReady || detectedPreviewUrl != null,
+                            previewUrl = detectedPreviewUrl ?: current.previewUrl,
+                        )
+                    } else current
+                }
             }
         }
         val exitCode = process.waitFor()

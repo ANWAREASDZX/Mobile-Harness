@@ -35,7 +35,7 @@ class LocalFormatGatewayTest {
     }
 
     private fun startGateway(): Pair<Int, String> {
-        gateway = LocalFormatGateway(ProviderProfile(kind = ProviderKind.OPENROUTER), "test-key").start()
+        gateway = LocalFormatGateway(ProviderProfile(kind = ProviderKind.LLM_ROUTER), "test-key").start()
         val match = Regex("""http://127\.0\.0\.1:(\d+)/t/([0-9a-f]{32})""").find(gateway.url)
             ?: error("gateway url has no token: ${gateway.url}")
         return match.groupValues[1].toInt() to match.groupValues[2]

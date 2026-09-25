@@ -37,10 +37,23 @@ internal object OutputFileTailer {
     suspend fun tailChunks(file: File, isAlive: () -> Boolean, onChunk: suspend (String) -> Unit) {
         var offset = 0L
         var pollMs = ACTIVE_POLL_MS
-        RandomAccessFile(file, "r").use { input ->
+        // Producers (native spawn, installers) may create the output file
+        // moments after the process is reported alive — wait for it to appear
+        // instead of failing the whole session.
+        var input: RandomAccessFile? = null
+        try {
             while (true) {
                 currentCoroutineContext().ensureActive()
-                val length = input.length()
+                if (input == null) {
+                    input = runCatching { RandomAccessFile(file, "r") }.getOrNull()
+                    if (input == null) {
+                        if (!isAlive()) break
+                        delay(pollMs)
+                        pollMs = minOf(pollMs * 2, MAX_IDLE_POLL_MS)
+                        continue
+                    }
+                }
+                val length = input!!.length()
                 if (length < offset) {
                     // The file was truncated under us; restart from the top so
                     // the caller never silently misses content.
@@ -49,9 +62,9 @@ internal object OutputFileTailer {
                 }
                 val available = length - offset
                 if (available > 0L) {
-                    input.seek(offset)
+                    input!!.seek(offset)
                     val bytes = ByteArray(minOf(available, CHUNK_BYTES).toInt())
-                    val count = input.read(bytes)
+                    val count = input!!.read(bytes)
                     if (count > 0) {
                         offset += count
                         pollMs = ACTIVE_POLL_MS
@@ -65,6 +78,8 @@ internal object OutputFileTailer {
                     pollMs = minOf(pollMs * 2, MAX_IDLE_POLL_MS)
                 }
             }
+        } finally {
+            runCatching { input?.close() }
         }
     }
 

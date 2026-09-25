@@ -486,7 +486,7 @@ private fun AntigravityOnboardingScreen(
             }
             Surface(color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f), shape = RoundedCornerShape(14.dp)) {
                 Text(
-                    stringResource(R.string.antigravity_auto_approval_note)
+                    stringResource(R.string.antigravity_auto_approval_note),
                     Modifier.fillMaxWidth().padding(14.dp),
                     color = MaterialTheme.colorScheme.onErrorContainer,
                     fontSize = 12.sp,
@@ -600,7 +600,7 @@ private fun BackgroundTaskSetupScreen(
             Text(stringResource(R.string.setup_prepare_title), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text(
-                stringResource(R.string.setup_time_note)
+                stringResource(R.string.setup_time_note),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
                 lineHeight = 18.sp,
@@ -725,7 +725,7 @@ private fun BackgroundTaskSetupScreen(
 
             Spacer(Modifier.height(16.dp))
             Text(
-                stringResource(R.string.bst_change_later_note)
+                stringResource(R.string.bst_change_later_note),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 10.5.sp,
                 lineHeight = 15.sp,
@@ -1107,7 +1107,7 @@ private fun RuntimeSetupPromptScreen(
                     }
                 }
                 Text(
-                    stringResource(R.string.setup_agent_download_note)
+                    stringResource(R.string.setup_agent_download_note),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 8.dp, start = 2.dp, end = 2.dp),
@@ -1412,7 +1412,7 @@ private fun AgentSwitchSheet(
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                stringResource(R.string.setup_switch_agent_note)
+                stringResource(R.string.setup_switch_agent_note),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
             )
@@ -1603,7 +1603,7 @@ private fun RuntimeInstallationScreen(
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                stringResource(R.string.install_background_note)
+                stringResource(R.string.install_background_note),
                 modifier = Modifier.fillMaxWidth(),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 11.sp,
@@ -1628,11 +1628,14 @@ private fun StartupLoadingScreen(
         view.keepScreenOn = true
         onDispose { view.keepScreenOn = false }
     }
+    val installPhaseSettingUp = stringResource(R.string.install_phase_setting_up)
+    val installPhasePreparing = stringResource(R.string.install_phase_preparing)
+    val installPhaseAlmostReady = stringResource(R.string.install_phase_almost_ready)
     val messages = remember {
         listOf(
-            stringResource(R.string.install_phase_setting_up),
-            stringResource(R.string.install_phase_preparing),
-            stringResource(R.string.install_phase_almost_ready),
+            installPhaseSettingUp,
+            installPhasePreparing,
+            installPhaseAlmostReady,
         )
     }
     var messageIndex by remember(state.startupStage) { mutableIntStateOf(0) }
@@ -2235,7 +2238,7 @@ private fun InterruptedSessionBanner(
                 Column {
                     Text(stringResource(R.string.interrupted_title), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                     Text(
-                        stringResource(R.string.interrupted_body, session.agentKind.title, session.projectSlug)
+                        stringResource(R.string.interrupted_body, session.agentKind.title, session.projectSlug),
                         fontSize = 12.sp,
                         lineHeight = 16.sp,
                     )
@@ -2263,7 +2266,7 @@ private fun InterruptedSessionBanner(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        stringResource(R.string.interrupted_battery_hint)
+                        stringResource(R.string.interrupted_battery_hint),
                         fontSize = 12.sp,
                         modifier = Modifier.weight(1f),
                     )
@@ -2557,7 +2560,7 @@ private fun DeviceCheckStep(context: Context, onContinue: () -> Unit) {
         CheckRow(Icons.Default.Storage, "Android", "Android ${Build.VERSION.RELEASE}", true)
         Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(16.dp)) {
             Text(
-                stringResource(R.string.provider_trust_warning)
+                stringResource(R.string.provider_trust_warning),
                 modifier = Modifier.padding(16.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2620,7 +2623,7 @@ private fun ProviderChoiceStep(
         Text(stringResource(R.string.provider_connect_ai), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
         Text(
-            stringResource(R.string.provider_choose_access)
+            stringResource(R.string.provider_choose_access),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 13.sp,
         )
@@ -2797,6 +2800,7 @@ private fun ProviderCredentialsStep(
     onChangeAgent: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var models by remember(baseUrl) { mutableStateOf(emptyList<DiscoveredModel>()) }
     var isDiscovering by remember { mutableStateOf(false) }
     var isValidating by remember { mutableStateOf(false) }
@@ -3120,7 +3124,7 @@ private fun ClaudeSubscriptionCredentialsStep(
             Text(stringResource(R.string.provider_claude_subscription), style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
             Text(
-                stringResource(R.string.provider_claude_subscription_note)
+                stringResource(R.string.provider_claude_subscription_note),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -3435,7 +3439,7 @@ private fun ProjectsScreen(
                                 textAlign = TextAlign.Center,
                             )
                             Text(
-                                stringResource(R.string.projects_none_hint)
+                                stringResource(R.string.projects_none_hint),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center,
@@ -4467,7 +4471,7 @@ private fun FilesTab(
                     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(stringResource(R.string.files_folder_detected), fontWeight = FontWeight.Bold)
                         Text(
-                            stringResource(R.string.files_root_note, suggestedProjectRoot)
+                            stringResource(R.string.files_root_note, suggestedProjectRoot),
                             fontSize = 13.sp,
                         )
                         Button(onClick = onUseSuggestedProjectRoot, modifier = Modifier.fillMaxWidth()) {

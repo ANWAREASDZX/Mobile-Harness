@@ -159,6 +159,11 @@ android {
     packaging.resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     packaging.jniLibs.useLegacyPackaging = true
     androidResources.noCompress += "zst"
+    testOptions {
+        // AppLog routes to android.util.Log, which plain JVM tests cannot
+        // link against; default values keep the logging path non-fatal there.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 tasks.matching { it.name.startsWith("mergeOffline") && it.name.endsWith("Assets") }

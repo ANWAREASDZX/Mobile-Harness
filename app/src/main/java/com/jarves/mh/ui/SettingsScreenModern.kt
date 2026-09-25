@@ -181,7 +181,7 @@ fun SettingsScreen(
             title = { Text(stringResource(R.string.settings_upgrade_title)) },
             text = {
                 Text(
-                    stringResource(R.string.settings_upgrade_body)
+                    stringResource(R.string.settings_upgrade_body),
                 )
             },
             confirmButton = {
@@ -202,7 +202,7 @@ fun SettingsScreen(
             title = { Text(stringResource(R.string.settings_rollback_title)) },
             text = {
                 Text(
-                    stringResource(R.string.settings_rollback_body)
+                    stringResource(R.string.settings_rollback_body),
                 )
             },
             confirmButton = {
@@ -414,7 +414,7 @@ fun SettingsScreen(
                     AnimatedVisibility(showReliabilityHelp) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
-                                stringResource(R.string.settings_child_process_note)
+                                stringResource(R.string.settings_child_process_note),
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -439,7 +439,7 @@ fun SettingsScreen(
                     onClick = { toggle(SettingsSection.SECURITY) },
                 ) {
                     Text(
-                        stringResource(R.string.settings_agent_permissions_note)
+                        stringResource(R.string.settings_agent_permissions_note),
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -464,7 +464,7 @@ fun SettingsScreen(
                     onClick = { toggle(SettingsSection.LINUX_BASE) },
                 ) {
                     Text(
-                        stringResource(R.string.settings_linux_base_note)
+                        stringResource(R.string.settings_linux_base_note),
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -492,7 +492,7 @@ fun SettingsScreen(
 
                         state.ubuntuMigrationPhase == UbuntuMigrationPhase.AWAITING_FIRST_SESSION -> {
                             Text(
-                                stringResource(R.string.settings_2404_rollback_kept)
+                                stringResource(R.string.settings_2404_rollback_kept),
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -505,7 +505,7 @@ fun SettingsScreen(
 
                         state.ubuntuMigrationPhase == UbuntuMigrationPhase.DONE -> {
                             Text(
-                                stringResource(R.string.settings_2404_finalized)
+                                stringResource(R.string.settings_2404_finalized),
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -513,7 +513,7 @@ fun SettingsScreen(
 
                         state.ubuntuUpgradeAvailable -> {
                             Text(
-                                stringResource(R.string.settings_upgrade_available)
+                                stringResource(R.string.settings_upgrade_available),
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -763,7 +763,7 @@ private fun AntigravityConnectionSettings(
 
     Surface(color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f), shape = RoundedCornerShape(12.dp)) {
         Text(
-            stringResource(R.string.settings_auto_approve_note)
+            stringResource(R.string.settings_auto_approve_note),
             Modifier.fillMaxWidth().padding(12.dp),
             color = MaterialTheme.colorScheme.onErrorContainer,
             fontSize = 11.sp,
@@ -1074,7 +1074,7 @@ private fun DebugUpdateChannelSection(
         onClick = { expanded = !expanded },
     ) {
         Text(
-            stringResource(R.string.settings_channel_note)
+            stringResource(R.string.settings_channel_note),
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

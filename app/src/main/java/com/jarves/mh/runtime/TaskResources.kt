@@ -78,9 +78,7 @@ internal object ThermalMonitor {
                     onThermal(status)
                 }
             }
-            val ok = runCatching {
-                manager.addOnThermalStatusChangedListener(context.mainExecutor, registered)
-            }.isSuccess
+            val ok = registerThermalListener(manager, context.mainExecutor, registered)
             return if (ok) {
                 power = manager
                 listener = registered
@@ -100,11 +98,42 @@ internal object ThermalMonitor {
     private fun stopLocked() {
         listener?.let { registered ->
             power?.let { manager ->
-                runCatching { manager.removeOnThermalStatusChangedListener(registered) }
+                unregisterThermalListener(manager, registered)
             }
         }
         listener = null
         power = null
         lastReported = PowerManager.THERMAL_STATUS_NONE
+    }
+
+    /**
+     * API 29-35 expose addOnThermalStatusChangedListener; SDK 36 renamed the
+     * pair to add/removeThermalStatusListener. The listener interface itself
+     * is stable across all of them, so reflective registration by either name
+     * works on every runtime without compile-time linkage problems.
+     */
+    private fun registerThermalListener(
+        manager: PowerManager,
+        executor: java.util.concurrent.Executor,
+        listener: PowerManager.OnThermalStatusChangedListener,
+    ): Boolean {
+        val add = manager.javaClass.methods.firstOrNull { method ->
+            method.parameterCount == 2 &&
+                method.parameterTypes[1] == PowerManager.OnThermalStatusChangedListener::class.java &&
+                (method.name == "addOnThermalStatusChangedListener" || method.name == "addThermalStatusListener")
+        } ?: return false
+        return runCatching { add.invoke(manager, executor, listener) }.isSuccess
+    }
+
+    private fun unregisterThermalListener(
+        manager: PowerManager,
+        listener: PowerManager.OnThermalStatusChangedListener,
+    ) {
+        val remove = manager.javaClass.methods.firstOrNull { method ->
+            method.parameterCount == 1 &&
+                method.parameterTypes[0] == PowerManager.OnThermalStatusChangedListener::class.java &&
+                (method.name == "removeOnThermalStatusChangedListener" || method.name == "removeThermalStatusListener")
+        } ?: return
+        runCatching { remove.invoke(manager, listener) }
     }
 }

@@ -1550,9 +1550,9 @@ private fun AgentProviderCard(
             if (selectedKind != ProviderKind.CLAUDE) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
+                val baseUrlRequired = stringResource(R.string.agent_base_url_required)
                 PremiumSummaryRow(
                     icon = Icons.Default.Info,
-                val baseUrlRequired = stringResource(R.string.agent_base_url_required)
                     title = if (selectedKind == ProviderKind.CUSTOM) stringResource(R.string.agent_custom_api) else stringResource(R.string.agent_endpoint_protocol),
                     subtitle = buildString {
                         append(baseUrl.ifBlank { baseUrlRequired })
@@ -1634,7 +1634,7 @@ private fun AgentProviderCard(
                 )
             } else {
                 Text(
-                    stringResource(R.string.agent_setup_token_note)
+                    stringResource(R.string.agent_setup_token_note),
                     fontSize = 12.sp,
                     lineHeight = 17.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1657,12 +1657,12 @@ private fun AgentProviderCard(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
-            PremiumSummaryRow(
             val noTokenSaved = stringResource(R.string.agent_no_token_saved)
             val noKeySaved = stringResource(R.string.agent_no_key_saved)
             val activeSuffix = stringResource(R.string.agent_active_suffix)
             val verifiedLabel = stringResource(R.string.agent_verified)
             val checkingLabel = stringResource(R.string.agent_checking)
+            PremiumSummaryRow(
                 icon = Icons.Default.Key,
                 title = if (selectedKind == ProviderKind.CLAUDE) stringResource(R.string.agent_subscription_token) else stringResource(R.string.agent_credentials),
                 subtitle = buildString {

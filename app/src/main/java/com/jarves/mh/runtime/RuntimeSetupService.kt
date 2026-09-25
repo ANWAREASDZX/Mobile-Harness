@@ -264,6 +264,7 @@ object RuntimeSetupController {
     private fun sanitize(line: String): String = line.filter { it == '\t' || it.code >= 32 }.take(500)
     private fun stateFile(context: Context) = File(context.filesDir, "setup/runtime-setup-state.json").apply { parentFile?.mkdirs() }
     private fun heartbeatFile(context: Context) = File(context.filesDir, "setup/runtime-setup-progress.json")
+    private fun logFile(context: Context) = File(context.filesDir, "setup/runtime-setup.log")
     private fun JSONObject.optLongOrNull(name: String): Long? = if (has(name) && !isNull(name)) optLong(name) else null
 
     @Volatile private var lastHeartbeatAt = 0L
