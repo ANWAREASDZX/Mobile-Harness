@@ -153,6 +153,10 @@ Mobile Harness unites modern **Jetpack Compose UI** with a self-contained **Ubun
 
 <br />
 
+**Bilingual interface:** all screens ship in English and Arabic through Android string resources, with full right-to-left layout mirroring on Arabic devices — the terminal console itself stays pinned left-to-right because a shell is inherently LTR. On Android 13+ the app language can be chosen per-app from system settings (`localeConfig`); earlier versions follow the system language.
+
+<br />
+
 ## Workspace Interface
 
 <table>
